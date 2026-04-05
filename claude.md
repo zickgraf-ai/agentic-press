@@ -108,6 +108,14 @@
 - All MCP proxy requests and responses logged for audit
 - No host filesystem access from sandbox except sbx-managed workspace mount
 
+## Development Workflow (Mandatory)
+- **TDD is required** — always write failing tests first (Red), implement minimally (Green), then refactor. Claude should proactively create test frameworks and helpers to reduce developer burden.
+- **GitHub issues first** — create a GitHub issue ticket before starting any new work.
+- **Worktree isolation** — always use `git worktree` when working on feature/fix branches.
+- **Branch naming** — `<type>/<issue-number>-<2-3-word-description>` where type is: `feat`, `fix`, `chore`, `refactor`, `docs`, `test`.
+  - Examples: `feat/27-implement-hooks`, `chore/68-update-docs`, `fix/45-fix-network-issue`
+- **Workflow sequence**: (1) create GitHub issue → (2) create worktree branch with correct naming → (3) write failing tests → (4) implement → (5) refactor → (6) PR back to main.
+
 ## Code Conventions
 - All source in `src/` with clear module boundaries
 - Tests alongside source files (`*.test.ts`)
