@@ -1,0 +1,33 @@
+{
+  "name": "agentic-press",
+  "version": "0.0.1",
+  "description": "MCP proxy layer for secure AI agent execution in Docker Sandbox (sbx)",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/index.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "lint": "eslint src/ tests/",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": ["mcp", "sandbox", "ai-agent", "security", "docker"],
+  "author": "Jeff Zickgraf",
+  "license": "MIT",
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.0.0",
+    "eslint": "^9.0.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^3.0.0"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.12.0",
+    "express": "^5.1.0"
+  },
+  "engines": {
+    "node": ">=20.0.0"
+  }
+}
