@@ -1,4 +1,4 @@
-# agent-sandbox
+# agentic-press
 
 A thin orchestration layer on top of [Docker Sandbox (sbx)](https://docs.docker.com/sandbox/) that adds mediated MCP access with injection prevention for secure AI coding agent execution.
 
@@ -14,7 +14,7 @@ A thin orchestration layer on top of [Docker Sandbox (sbx)](https://docs.docker.
 ## Prerequisites
 
 - [Docker Desktop](https://www.docker.com/products/docker-desktop/) with Sandbox support
-- Node.js >= 22
+- Node.js >= 20 (sbx sandboxes ship Node 20.x)
 - `sbx` CLI (included with Docker Desktop)
 
 ## Quick Start
@@ -39,18 +39,23 @@ npm run lint       # Lint
 ## Architecture
 
 ```
-Host Machine                          Docker Sandbox (sbx)
-┌─────────────────────┐              ┌──────────────────────┐
-│  MCP Servers (stdio) │◄────────────│  AI Agent            │
-│  - filesystem        │  MCP Proxy  │  (Claude Code, etc.) │
-│  - git               │  (HTTP)     │                      │
-│  - github            │             │  Connects to proxy   │
-│  - custom            │  Filters:   │  via host.docker.    │
-│                      │  - Allowlist│  internal:18923      │
-│  MCP Proxy Server ◄──┤  - Sanitize │                      │
-│  :18923              │  - PathGuard│                      │
-│                      │  - AuditLog │                      │
-└─────────────────────┘              └──────────────────────┘
+Docker Sandbox (sbx)                 Host Machine
+┌──────────────────────┐            ┌─────────────────────────────────────┐
+│                      │            │                                     │
+│  AI Agent            │  JSON-RPC  │  MCP Proxy Server (:18923)          │
+│  (Claude Code, etc.) ├───────────►│  ┌─────────────────────────────┐   │
+│                      │  over HTTP │  │ 1. Allowlist check           │   │
+│  Connects via        │            │  │ 2. Path guard                │   │
+│  host.docker.        │            │  │ 3. Forward to MCP server     │   │
+│  internal:18923      │            │  │ 4. Sanitize response         │   │
+│                      │◄───────────┤  │ 5. Audit log                 │   │
+│                      │  filtered  │  └──────────────┬──────────────┘   │
+└──────────────────────┘  response  │                 │ stdio            │
+                                    │  ┌──────────────▼──────────────┐   │
+                                    │  │ MCP Servers                  │   │
+                                    │  │ - filesystem, git, github    │   │
+                                    │  └─────────────────────────────┘   │
+                                    └─────────────────────────────────────┘
 ```
 
 ## License

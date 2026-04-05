@@ -1,20 +1,24 @@
+import type { SessionId, SandboxId } from "../types.js";
+
+export type SessionStatus = "active" | "completed" | "failed";
+
 export interface DashboardSession {
-  id: string;
-  sandboxName: string;
-  startedAt: string;
-  status: "active" | "completed" | "failed";
+  readonly id: SessionId;
+  readonly sandboxName: SandboxId;
+  readonly startedAt: string;
+  readonly status: SessionStatus;
 }
 
 export function registerSession(
-  _sandboxName: string,
+  _sandboxName: SandboxId,
   _taskDescription?: string
 ): Promise<DashboardSession> {
   throw new Error("Not implemented");
 }
 
 export function updateSessionStatus(
-  _sessionId: string,
-  _status: DashboardSession["status"]
+  _sessionId: SessionId,
+  _status: SessionStatus
 ): Promise<void> {
   throw new Error("Not implemented");
 }

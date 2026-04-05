@@ -1,15 +1,14 @@
 export type SanitizeMode = "flag" | "strip" | "block";
 
-export interface SanitizeResult {
-  clean: boolean;
-  content: string;
-  flags: SanitizeFlag[];
+export interface SanitizeFlag {
+  readonly pattern: string;
+  readonly match: string;
+  readonly position: number;
 }
 
-export interface SanitizeFlag {
-  pattern: string;
-  match: string;
-  position: number;
+export interface SanitizeResult {
+  readonly content: string;
+  readonly flags: readonly SanitizeFlag[];
 }
 
 export function sanitize(

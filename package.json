@@ -1,5 +1,5 @@
 {
-  "name": "agent-sandbox",
+  "name": "agentic-press",
   "version": "0.0.1",
   "description": "MCP proxy layer for secure AI agent execution in Docker Sandbox (sbx)",
   "type": "module",

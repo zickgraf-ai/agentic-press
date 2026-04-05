@@ -1,11 +1,13 @@
+import type { TraceId, SessionId, AuditStatus } from "../types.js";
+
 export interface TraceContext {
-  traceId: string;
-  sessionId: string;
+  readonly traceId: TraceId;
+  readonly sessionId: SessionId;
 }
 
 export function startTrace(
-  _sessionId: string,
-  _metadata?: Record<string, unknown>
+  _sessionId: SessionId,
+  _metadata?: Readonly<Record<string, unknown>>
 ): TraceContext {
   throw new Error("Not implemented");
 }
@@ -15,8 +17,8 @@ export function spanToolCall(
   _toolName: string,
   _args: unknown,
   _durationMs: number,
-  _status: string,
-  _flags?: string[]
+  _status: AuditStatus,
+  _flags?: readonly string[]
 ): void {
   throw new Error("Not implemented");
 }

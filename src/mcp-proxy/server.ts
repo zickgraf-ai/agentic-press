@@ -1,9 +1,10 @@
 import type { Express } from "express";
+import type { LogLevel } from "../types.js";
 
 export interface ProxyServerConfig {
-  port: number;
-  allowedTools: string[];
-  logLevel: string;
+  readonly port: number;
+  readonly allowedTools: readonly string[];
+  readonly logLevel: LogLevel;
 }
 
 export function createProxyServer(_config: ProxyServerConfig): Express {

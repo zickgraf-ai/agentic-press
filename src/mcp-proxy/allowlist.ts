@@ -1,11 +1,10 @@
 export interface AllowlistConfig {
-  patterns: string[];
+  readonly patterns: readonly string[];
 }
 
-export interface AllowlistResult {
-  allowed: boolean;
-  reason?: string;
-}
+export type AllowlistResult =
+  | { readonly allowed: true }
+  | { readonly allowed: false; readonly reason: string };
 
 export function checkAllowlist(
   _toolName: string,
