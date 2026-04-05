@@ -208,10 +208,11 @@ describe("path guard", () => {
       expect(result.allowed).toBe(true);
     });
 
-    it("blocks path with only dots", () => {
+    it("allows triple-dot as literal filename within workspace", () => {
+      // "..." is a valid filename on POSIX — not a traversal sequence.
+      // Resolved as /home/agent/workspace/..., which is inside the root.
       const result = checkPath("...", config);
-      // Three dots is not a valid traversal but is suspicious
-      expect(typeof result.allowed).toBe("boolean");
+      expect(result.allowed).toBe(true);
     });
 
     it("handles trailing slashes consistently", () => {

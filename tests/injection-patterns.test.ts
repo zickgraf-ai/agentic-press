@@ -142,6 +142,9 @@ describe("injection pattern detection", () => {
   });
 
   // ── System prompt / tool definition override ───────────────────────
+  // CVE-2025-6514: mcp-remote (CVSS 9.6) — arbitrary OS command execution
+  // via crafted authorization_endpoint URLs. Demonstrates that injected
+  // tool/function definitions in MCP responses can trigger code execution.
 
   describe("system prompt and tool definition overrides in MCP responses", () => {
     const payloads = [
