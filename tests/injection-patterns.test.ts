@@ -191,6 +191,13 @@ describe("injection pattern detection", () => {
       "path/to/file.ts",
       "import { system } from './config';",
       "We should disregard the old API and use the new one",
+      // Legitimate base64 that must NOT trigger encoded_payload detection
+      "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9", // JWT header
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk", // PNG header
+      "data:image/png;base64,iVBORw0KGgoAAAANSUhEUg==", // data URI
+      "SGVsbG8gV29ybGQ=", // "Hello World" — benign content
+      "dHlwZXNjcmlwdA==", // "typescript" — benign word
+      '{"token": "eyJhbGciOiJSUzI1NiIsInR5cCI6IkpXVCJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0"}', // JWT in JSON
     ];
 
     it.each(cleanInputs)("does not flag: %s", (content) => {

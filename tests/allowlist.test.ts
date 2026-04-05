@@ -139,13 +139,13 @@ describe("tool allowlist", () => {
       expect(result.allowed).toBe(true);
     });
 
-    it("double-star wildcard is not supported (no glob recursion)", () => {
+    it("double-star is treated as single-star (no glob recursion)", () => {
       const config: AllowlistConfig = { patterns: ["fs.**"] };
-      // ** should be treated same as *, not as recursive glob
-      const result = checkAllowlist("fs.sub.deep", config);
-      // Implementation choice: either allow or block, but be consistent
-      // We'll verify this matches the implementation's documented behavior
-      expect(typeof result.allowed).toBe("boolean");
+      // ** should behave identically to * — matches any suffix after "fs."
+      const shallow = checkAllowlist("fs.read", config);
+      const deep = checkAllowlist("fs.sub.deep", config);
+      expect(shallow.allowed).toBe(true);
+      expect(deep.allowed).toBe(true);
     });
   });
 });
