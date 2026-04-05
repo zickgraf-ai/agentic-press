@@ -148,4 +148,47 @@ describe("tool allowlist", () => {
       expect(deep.allowed).toBe(true);
     });
   });
+
+  // ── Malformed config ───────────────────────────────────────────────
+
+  describe("malformed config is handled defensively", () => {
+    it("throws or blocks when config is null", () => {
+      // Safety: a null config must never silently allow tools
+      expect(() => {
+        const result = checkAllowlist("Read", null as unknown as AllowlistConfig);
+        // If it doesn't throw, it must block
+        expect(result.allowed).toBe(false);
+      }).not.toThrow(); // prefer blocking over throwing, but either is safe
+    });
+
+    it("throws or blocks when config is undefined", () => {
+      expect(() => {
+        const result = checkAllowlist("Read", undefined as unknown as AllowlistConfig);
+        expect(result.allowed).toBe(false);
+      }).not.toThrow();
+    });
+
+    it("throws or blocks when patterns is null", () => {
+      const config = { patterns: null } as unknown as AllowlistConfig;
+      expect(() => {
+        const result = checkAllowlist("Read", config);
+        expect(result.allowed).toBe(false);
+      }).not.toThrow();
+    });
+
+    it("throws or blocks when patterns is undefined", () => {
+      const config = { patterns: undefined } as unknown as AllowlistConfig;
+      expect(() => {
+        const result = checkAllowlist("Read", config);
+        expect(result.allowed).toBe(false);
+      }).not.toThrow();
+    });
+
+    it("treats patterns with empty strings as non-matching", () => {
+      const config: AllowlistConfig = { patterns: ["", "  ", "Read"] };
+      expect(checkAllowlist("Read", config).allowed).toBe(true);
+      expect(checkAllowlist("", config).allowed).toBe(false);
+      expect(checkAllowlist("  ", config).allowed).toBe(false);
+    });
+  });
 });
