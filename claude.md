@@ -25,7 +25,10 @@ npm run dev          # Start MCP proxy (tsx)
 - All injection patterns are **clean-room** from public sources: OWASP Top 10 for LLM Apps, MCP spec, published CVEs
 - **DO NOT** port code from Ren or Wake — clean-room only
 - MCP proxy MUST validate all tool calls against allowlist before forwarding
-- Reference CVEs: CVE-2025-6514 (mcp-remote, CVSS 9.6), CVE-2025-53110 (directory containment bypass), CVE-2025-53109 (symlink traversal bypass)
+- Reference CVEs:
+  - CVE-2025-6514 (mcp-remote, CVSS 9.6 — arbitrary OS command execution via crafted authorization_endpoint URLs)
+  - CVE-2025-53110 (Filesystem MCP Server — directory containment bypass)
+  - CVE-2025-53109 (Filesystem MCP Server — symlink traversal bypass)
 - Run security tests after ANY change to `src/security/` or `src/mcp-proxy/sanitizer.ts`
 - All MCP proxy requests/responses logged for audit
 - No host filesystem access from sandbox except sbx-managed workspace mount

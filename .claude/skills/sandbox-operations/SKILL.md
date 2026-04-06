@@ -3,6 +3,12 @@ name: sandbox-operations
 description: Docker Sandbox sbx commands, agent types, and network policies
 ---
 
+## Implementation Status
+- **Verified**: sbx v0.23.0 CLI fully tested — create, exec, ports, policies, secrets, save all working
+- **Not yet implemented**: Custom sbx template (`scripts/setup-sbx-template.sh` exists but untested), integration test (`scripts/sandbox-run.sh` — stub)
+- **Next**: Issue #8 — sbx template and end-to-end integration test
+- **Note**: Version info (Ubuntu 25.10, Node 20, Python 3.13) was accurate as of 2026-04-05. Run `sbx exec NAME bash -c 'cat /etc/os-release && node -v'` to verify current versions.
+
 ## sbx Basics
 
 sbx (Docker Sandbox) provides microVM-isolated sandbox environments for AI agents. Each sandbox gets its own Docker daemon, filesystem, and network.

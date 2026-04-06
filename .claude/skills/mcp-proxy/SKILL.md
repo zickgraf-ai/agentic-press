@@ -3,6 +3,11 @@ name: mcp-proxy
 description: MCP proxy architecture, JSON-RPC bridging, and allowlist design
 ---
 
+## Implementation Status
+- **Implemented**: Allowlist (`src/mcp-proxy/allowlist.ts`), sanitizer (`src/mcp-proxy/sanitizer.ts`), logger types (`src/mcp-proxy/logger.ts` — stub)
+- **Not yet implemented**: HTTP server (`server.ts` — stub), stdio bridge (`stdio-bridge.ts` — stub), entry point (`index.ts` — calls unimplemented createProxyServer)
+- **Next**: Issue #7 — MCP proxy server and stdio bridge
+
 ## Proxy Role
 
 HTTP server running on the HOST machine, accepting JSON-RPC 2.0 MCP protocol requests from sandboxed agents over HTTP. Sandboxed agents connect via `host.docker.internal:18923` (configurable via `MCP_PROXY_PORT` env var).

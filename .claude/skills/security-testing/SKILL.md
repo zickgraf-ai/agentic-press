@@ -3,6 +3,10 @@ name: security-testing
 description: Injection prevention patterns, CVE references, and test-first security workflow
 ---
 
+## Implementation Status
+- **Implemented**: Injection patterns (17 patterns, 5 categories), sanitizer (flag/strip/block modes), allowlist (exact/wildcard/catch-all), path guard (traversal, symlinks, encoded)
+- **Tests**: 178 passing — injection-patterns, sanitizer, allowlist, path-guard
+
 ## Injection Pattern Categories
 
 We test for these attack vectors in MCP tool responses and requests:

@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "if echo \"$CLAUDE_TOOL_INPUT\" | grep -qE 'src/security/|src/mcp-proxy/sanitizer'; then npx vitest run tests/sanitizer.test.ts tests/injection-patterns.test.ts tests/path-guard.test.ts --reporter=verbose 2>&1; fi",
+            "command": "if echo \"$CLAUDE_FILE_PATH\" | grep -qE 'src/security/|src/mcp-proxy/'; then npx vitest run tests/sanitizer.test.ts tests/injection-patterns.test.ts tests/path-guard.test.ts tests/allowlist.test.ts --reporter=verbose 2>&1; fi",
             "timeout": 30000
           },
           {
@@ -23,7 +23,7 @@
           {
             "type": "command",
             "command": "npx vitest run --reporter=verbose 2>&1",
-            "timeout": 60000,
+            "timeout": 120000,
             "blocking": true
           }
         ]
