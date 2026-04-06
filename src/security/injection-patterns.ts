@@ -16,12 +16,18 @@ export type PatternCategory =
   | "path_traversal"
   | "system_override";
 
+export interface PatternMatch {
+  readonly match: string;
+  readonly position: number;
+}
+
 export interface InjectionPattern {
   readonly name: string;
   readonly description: string;
   readonly severity: PatternSeverity;
   readonly category: PatternCategory;
   test(content: string): boolean;
+  find(content: string): PatternMatch | null;
 }
 
 function pat(
@@ -31,17 +37,18 @@ function pat(
   category: PatternCategory,
   regex: RegExp
 ): InjectionPattern {
-  return { name, description, severity, category, test: (c) => regex.test(c) };
-}
-
-function patFn(
-  name: string,
-  description: string,
-  severity: PatternSeverity,
-  category: PatternCategory,
-  testFn: (content: string) => boolean
-): InjectionPattern {
-  return { name, description, severity, category, test: testFn };
+  return {
+    name,
+    description,
+    severity,
+    category,
+    test: (c) => regex.test(c),
+    find: (c) => {
+      const m = c.match(regex);
+      if (!m || m.index === undefined) return null;
+      return { match: m[0], position: m.index };
+    },
+  };
 }
 
 // ── Base64 payload detection ───────────────────────────────────────
@@ -64,20 +71,45 @@ function containsDangerousBase64(content: string): boolean {
   if (!matches) return false;
 
   for (const match of matches) {
+    let decoded: string;
     try {
-      const decoded = Buffer.from(match, "base64").toString("utf-8");
+      decoded = Buffer.from(match, "base64").toString("utf-8");
       // Verify it's valid base64 by round-tripping
       const reencoded = Buffer.from(decoded, "utf-8").toString("base64");
       const norm = (s: string) => s.replace(/=+$/, "");
       if (norm(reencoded) !== norm(match)) continue;
+    } catch {
+      // Only decode errors are caught — skip invalid base64
+      continue;
+    }
 
-      // Only flag if decoded content is dangerous
-      if (DANGEROUS_DECODED.some((p) => p.test(decoded))) return true;
+    // Regex matching is outside try/catch so failures propagate (#3)
+    if (DANGEROUS_DECODED.some((p) => p.test(decoded))) return true;
+  }
+  return false;
+}
+
+function findDangerousBase64(content: string): PatternMatch | null {
+  const matches = content.match(BASE64_BLOCK);
+  if (!matches) return null;
+
+  for (const match of matches) {
+    let decoded: string;
+    try {
+      decoded = Buffer.from(match, "base64").toString("utf-8");
+      const reencoded = Buffer.from(decoded, "utf-8").toString("base64");
+      const norm = (s: string) => s.replace(/=+$/, "");
+      if (norm(reencoded) !== norm(match)) continue;
     } catch {
       continue;
     }
+
+    if (DANGEROUS_DECODED.some((p) => p.test(decoded))) {
+      const idx = content.indexOf(match);
+      return { match, position: idx >= 0 ? idx : 0 };
+    }
   }
-  return false;
+  return null;
 }
 
 // ── Pattern definitions ────────────────────────────────────────────
@@ -96,7 +128,8 @@ const PATTERNS: readonly InjectionPattern[] = [
     "Variant of instruction override using 'disregard'",
     "critical",
     "prompt_injection",
-    /\bdisregard\s+(all\s+)?(previous|prior|above|your)?\s*(instructions?|directives?|rules?)\b/i
+    // Qualifier (previous|prior|above|your) is required — not optional (#5)
+    /\bdisregard\s+(all\s+)?(previous|prior|above|your)\s+(instructions?|directives?|rules?)\b/i
   ),
   pat(
     "forget_instructions",
@@ -132,10 +165,11 @@ const PATTERNS: readonly InjectionPattern[] = [
   ),
 
   // System override — tool/function injection (CVE-2025-6514 related)
+  // Lowered to high — {"tools": [...]} can appear in legitimate MCP responses (#7)
   pat(
     "tool_definition_injection",
     "Injected tool definitions in MCP response",
-    "critical",
+    "high",
     "system_override",
     /\{\s*"tools"\s*:\s*\[/
   ),
@@ -163,14 +197,15 @@ const PATTERNS: readonly InjectionPattern[] = [
     /[\u200B\u200C\u200D\uFEFF\u2060]/
   ),
 
-  // Encoded payloads
-  patFn(
-    "dangerous_base64",
-    "Base64 that decodes to a known injection pattern",
-    "high",
-    "encoded_payload",
-    containsDangerousBase64
-  ),
+  // Encoded payloads — uses custom test/find functions
+  {
+    name: "dangerous_base64",
+    description: "Base64 that decodes to a known injection pattern",
+    severity: "high",
+    category: "encoded_payload",
+    test: containsDangerousBase64,
+    find: findDangerousBase64,
+  },
 
   // Markup injection
   pat(
