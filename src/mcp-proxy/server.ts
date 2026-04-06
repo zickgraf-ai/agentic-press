@@ -29,16 +29,39 @@ function jsonRpcError(id: number | string | null, code: number, message: string)
   return { jsonrpc: "2.0", id, error: { code, message } };
 }
 
-// Scan all string values in args for path-like content (#C-5)
-// A string is path-like if it contains a slash or starts with a dot
-function extractPathArgs(args: Record<string, unknown>): string[] {
-  const paths: string[] = [];
-  for (const [, val] of Object.entries(args)) {
-    if (typeof val === "string" && (val.includes("/") || val.includes("\\") || val.startsWith("."))) {
-      paths.push(val);
+// Recursively extract path-like strings from args (#N-1)
+// Path-like: starts with /, ./, ../, ~, or a drive letter (C:)
+// Recurses into nested objects and arrays
+function extractPathArgs(value: unknown): string[] {
+  if (typeof value === "string") {
+    if (/^(\/|\.\/|\.\.\/)/.test(value) || /^~\//.test(value) || /^[A-Za-z]:/.test(value)) {
+      return [value];
     }
+    return [];
   }
-  return paths;
+  if (Array.isArray(value)) {
+    return value.flatMap(extractPathArgs);
+  }
+  if (value && typeof value === "object") {
+    return Object.values(value).flatMap(extractPathArgs);
+  }
+  return [];
+}
+
+// Sanitize individual string values, not serialized JSON (#N-2)
+function sanitizeArgs(args: Record<string, unknown>): ReturnType<typeof sanitize> | null {
+  for (const val of collectStrings(args)) {
+    const result = sanitize(val);
+    if (result.flags.length > 0) return result;
+  }
+  return null;
+}
+
+function collectStrings(value: unknown): string[] {
+  if (typeof value === "string") return [value];
+  if (Array.isArray(value)) return value.flatMap(collectStrings);
+  if (value && typeof value === "object") return Object.values(value).flatMap(collectStrings);
+  return [];
 }
 
 export function createProxyServer(config: ProxyServerConfig): Express {
@@ -54,6 +77,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
 
   app.post("/mcp", (req: Request, res: Response) => {
     const start = Date.now();
+    let requestId: number | string | null = null; // Hoisted for catch block (#N-3)
 
     try {
       const body = req.body;
@@ -63,11 +87,12 @@ export function createProxyServer(config: ProxyServerConfig): Express {
         return;
       }
 
-      const { id, method, params } = body;
+      requestId = body.id;
+      const { method, params } = body;
 
-      // Only handle tools/call — reject other methods with JSON-RPC error (#H-6)
+      // Only handle tools/call — reject other methods
       if (method !== "tools/call" || !params) {
-        res.json(jsonRpcError(id, -32601, `Method not supported: ${method}`));
+        res.json(jsonRpcError(requestId, -32601, `Method not supported: ${method}`));
         return;
       }
 
@@ -86,14 +111,13 @@ export function createProxyServer(config: ProxyServerConfig): Express {
           durationMs: Date.now() - start,
         };
         logAuditEntry(entry);
-        res.json(jsonRpcError(id, -32600, allowResult.reason));
+        res.json(jsonRpcError(requestId, -32600, allowResult.reason));
         return;
       }
 
-      // 2. Sanitize tool arguments — check for injection patterns (#C-4)
-      const argString = JSON.stringify(toolArgs);
-      const sanitizeResult = sanitize(argString);
-      if (sanitizeResult.flags.length > 0) {
+      // 2. Sanitize individual string values in arguments (#N-2)
+      const sanitizeResult = sanitizeArgs(toolArgs);
+      if (sanitizeResult && sanitizeResult.flags.length > 0) {
         const entry: AuditEntry = {
           timestamp: new Date().toISOString(),
           tool: toolName,
@@ -103,11 +127,11 @@ export function createProxyServer(config: ProxyServerConfig): Express {
           durationMs: Date.now() - start,
         };
         logAuditEntry(entry);
-        res.json(jsonRpcError(id, -32600, `Injection pattern detected in arguments: ${sanitizeResult.flags.map(f => f.pattern).join(", ")}`));
+        res.json(jsonRpcError(requestId, -32600, `Injection pattern detected in arguments: ${sanitizeResult.flags.map(f => f.pattern).join(", ")}`));
         return;
       }
 
-      // 3. Path guard — check all path-like string values in arguments
+      // 3. Path guard — recursively check all path-like strings (#N-1)
       const paths = extractPathArgs(toolArgs);
       for (const p of paths) {
         const pathResult = checkPath(p, { workspaceRoot });
@@ -121,7 +145,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
             durationMs: Date.now() - start,
           };
           logAuditEntry(entry);
-          res.json(jsonRpcError(id, -32600, `Blocked path: ${pathResult.reason}`));
+          res.json(jsonRpcError(requestId, -32600, `Blocked path: ${pathResult.reason}`));
           return;
         }
       }
@@ -138,16 +162,17 @@ export function createProxyServer(config: ProxyServerConfig): Express {
       };
       logAuditEntry(entry);
 
-      res.json(jsonRpcError(id, -32603, `No MCP backend configured for tool "${toolName}"`));
+      res.json(jsonRpcError(requestId, -32603, `No MCP backend configured for tool "${toolName}"`));
     } catch (err) {
-      // Always return JSON-RPC errors, never HTML (#H-5)
       const message = err instanceof Error ? err.message : "Internal server error";
-      res.status(500).json(jsonRpcError(null, -32603, message));
+      console.error("MCP proxy error:", err); // (#N-4)
+      res.status(500).json(jsonRpcError(requestId, -32603, message));
     }
   });
 
-  // Global error handler — ensures JSON-RPC responses even on unexpected errors (#H-5)
+  // Global error handler (#H-5)
   app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
+    console.error("MCP proxy unhandled error:", err); // (#N-4)
     res.status(500).json(jsonRpcError(null, -32603, err.message));
   });
 
