@@ -222,7 +222,6 @@ describe("injection pattern detection", () => {
           "unicode_smuggling",
           "encoded_payload",
           "markup_injection",
-          "path_traversal",
           "system_override",
         ]).toContain(p.category);
       }

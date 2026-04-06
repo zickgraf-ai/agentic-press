@@ -13,7 +13,6 @@ export type PatternCategory =
   | "unicode_smuggling"
   | "encoded_payload"
   | "markup_injection"
-  | "path_traversal"
   | "system_override";
 
 export interface PatternMatch {
@@ -53,8 +52,8 @@ function pat(
 
 // ── Base64 payload detection ───────────────────────────────────────
 // Only flags base64 that decodes to known dangerous content, not all base64.
-
-const BASE64_BLOCK = /[A-Za-z0-9+/]{20,}={0,2}/g;
+// BASE64_BLOCK is created locally inside each function to avoid lastIndex
+// state bugs from a module-scoped regex with the g flag.
 
 const DANGEROUS_DECODED = [
   /ignore\s+(previous|prior|all)\s+instructions/i,
@@ -67,7 +66,7 @@ const DANGEROUS_DECODED = [
 ];
 
 function containsDangerousBase64(content: string): boolean {
-  const matches = content.match(BASE64_BLOCK);
+  const matches = content.match(/[A-Za-z0-9+/]{20,}={0,2}/g);
   if (!matches) return false;
 
   for (const match of matches) {
@@ -90,7 +89,7 @@ function containsDangerousBase64(content: string): boolean {
 }
 
 function findDangerousBase64(content: string): PatternMatch | null {
-  const matches = content.match(BASE64_BLOCK);
+  const matches = content.match(/[A-Za-z0-9+/]{20,}={0,2}/g);
   if (!matches) return null;
 
   for (const match of matches) {
@@ -220,7 +219,7 @@ const PATTERNS: readonly InjectionPattern[] = [
     "HTML event handler attribute (onclick, onerror, etc.)",
     "high",
     "markup_injection",
-    /\bon\w+\s*=\s*["']/i
+    /\b(onclick|onerror|onload|onmouseover|onmouseout|onfocus|onblur|onsubmit|onchange|oninput|onkeydown|onkeyup|onkeypress|onresize|onscroll|onunload|onbeforeunload)\s*=\s*["']/i
   ),
   pat(
     "iframe_tag",
