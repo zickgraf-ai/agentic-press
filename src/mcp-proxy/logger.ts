@@ -10,6 +10,6 @@ export interface AuditEntry {
   readonly durationMs?: number;
 }
 
-export function logAuditEntry(_entry: AuditEntry): void {
-  throw new Error("Not implemented");
+export function logAuditEntry(entry: AuditEntry): void {
+  process.stdout.write(JSON.stringify(entry) + "\n");
 }
