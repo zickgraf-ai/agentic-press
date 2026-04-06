@@ -12,56 +12,92 @@ export interface StdioBridge {
   shutdown(): Promise<void>;
 }
 
+interface PendingHandler {
+  resolve: (v: unknown) => void;
+  reject: (e: Error) => void;
+  timeout: ReturnType<typeof setTimeout>;
+}
+
 interface ManagedProcess {
+  def: McpServerDef;
   proc: ChildProcess;
   nextId: number;
-  pending: Map<number, { resolve: (v: unknown) => void; reject: (e: Error) => void }>;
+  pending: Map<number, PendingHandler>;
   buffer: string;
+}
+
+function rejectAllPending(managed: ManagedProcess, error: Error): void {
+  for (const [, handler] of managed.pending) {
+    clearTimeout(handler.timeout);
+    handler.reject(error);
+  }
+  managed.pending.clear();
 }
 
 function spawnServer(def: McpServerDef): ManagedProcess {
   const proc = spawn(def.command, def.args, {
-    stdio: ["pipe", "pipe", "pipe"],
+    stdio: ["pipe", "pipe", "inherit"], // stderr → inherit, not piped (#H-1)
     env: { ...process.env, ...def.env },
   });
 
   const managed: ManagedProcess = {
+    def,
     proc,
     nextId: 1,
     pending: new Map(),
     buffer: "",
   };
 
-  proc.stdout!.setEncoding("utf8");
-  proc.stdout!.on("data", (chunk: string) => {
-    managed.buffer += chunk;
-    const lines = managed.buffer.split("\n");
-    managed.buffer = lines.pop() || "";
+  // Handle spawn errors (ENOENT, permission denied) (#C-3)
+  proc.on("error", (err) => {
+    rejectAllPending(managed, new Error(`Server "${def.name}" spawn error: ${err.message}`));
+  });
 
-    for (const line of lines) {
-      if (!line.trim()) continue;
-      try {
-        const msg = JSON.parse(line);
-        if (msg.id !== undefined && managed.pending.has(msg.id)) {
-          const handler = managed.pending.get(msg.id)!;
-          managed.pending.delete(msg.id);
+  // Handle stdin write errors (broken pipe if child dies) (#C-2)
+  if (proc.stdin) {
+    proc.stdin.on("error", (err) => {
+      rejectAllPending(managed, new Error(`Server "${def.name}" stdin error: ${err.message}`));
+    });
+  }
+
+  if (proc.stdout) {
+    proc.stdout.setEncoding("utf8");
+    proc.stdout.on("data", (chunk: string) => {
+      managed.buffer += chunk;
+      const lines = managed.buffer.split("\n");
+      managed.buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        // Only catch JSON parse errors — post-parse logic is outside try (#C-1)
+        let msg: Record<string, unknown>;
+        try {
+          msg = JSON.parse(line);
+        } catch {
+          continue; // Skip non-JSON lines
+        }
+
+        if (msg.id !== undefined && managed.pending.has(msg.id as number)) {
+          const handler = managed.pending.get(msg.id as number)!;
+          managed.pending.delete(msg.id as number);
+          clearTimeout(handler.timeout);
           if (msg.error) {
-            handler.reject(new Error(msg.error.message ?? JSON.stringify(msg.error)));
+            const errObj = msg.error as Record<string, unknown>;
+            handler.reject(new Error((errObj.message as string) ?? JSON.stringify(msg.error)));
           } else {
             handler.resolve(msg.result);
           }
         }
-      } catch {
-        // Ignore non-JSON lines
       }
-    }
-  });
+    });
+  }
 
-  proc.on("exit", () => {
-    for (const [, handler] of managed.pending) {
-      handler.reject(new Error(`Server process exited`));
-    }
-    managed.pending.clear();
+  proc.on("exit", (code, signal) => {
+    // Include server name, exit code, and signal in error message (#H-2)
+    rejectAllPending(
+      managed,
+      new Error(`Server "${def.name}" exited (code=${code}, signal=${signal})`)
+    );
   });
 
   return managed;
@@ -76,13 +112,18 @@ export function createStdioBridge(servers: McpServerDef[]): StdioBridge {
   }
 
   function getOrSpawn(name: string): ManagedProcess {
-    let managed = processes.get(name);
-    if (managed && managed.proc.exitCode === null) return managed;
+    const existing = processes.get(name);
+    if (existing && existing.proc.exitCode === null) return existing;
+
+    // Reject old pending entries before replacing (#H-4)
+    if (existing) {
+      rejectAllPending(existing, new Error(`Server "${name}" process died, restarting`));
+    }
 
     const def = definitions.get(name);
     if (!def) throw new Error(`Server "${name}" not found or not configured`);
 
-    managed = spawnServer(def);
+    const managed = spawnServer(def);
     processes.set(name, managed);
     return managed;
   }
@@ -95,26 +136,27 @@ export function createStdioBridge(servers: McpServerDef[]): StdioBridge {
       return new Promise<unknown>((resolve, reject) => {
         const timeout = setTimeout(() => {
           managed.pending.delete(id);
-          reject(new Error(`Request ${id} to "${serverName}" timed out`));
+          reject(new Error(`Request ${id} to "${serverName}" timed out after 30s`));
         }, 30000);
 
-        managed.pending.set(id, {
-          resolve: (v) => { clearTimeout(timeout); resolve(v); },
-          reject: (e) => { clearTimeout(timeout); reject(e); },
-        });
+        managed.pending.set(id, { resolve, reject, timeout });
+
+        if (!managed.proc.stdin || managed.proc.stdin.destroyed) {
+          clearTimeout(timeout);
+          managed.pending.delete(id);
+          reject(new Error(`Server "${serverName}" stdin not available`));
+          return;
+        }
 
         const request = JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n";
-        managed.proc.stdin!.write(request);
+        managed.proc.stdin.write(request);
       });
     },
 
     async shutdown(): Promise<void> {
       for (const [, managed] of processes) {
+        rejectAllPending(managed, new Error("Bridge shutting down")); // clears timeouts (#H-3)
         managed.proc.kill();
-        for (const [, handler] of managed.pending) {
-          handler.reject(new Error("Bridge shutting down"));
-        }
-        managed.pending.clear();
       }
       processes.clear();
     },
