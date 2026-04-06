@@ -3,6 +3,11 @@ name: observability
 description: Langfuse and Grafana Cloud integration patterns
 ---
 
+## Implementation Status
+- **Not yet implemented**: All observability modules are stubs (`src/observability/langfuse.ts`, `metrics.ts`, `config.ts` all throw "Not implemented")
+- **No SDK dependencies yet**: @langfuse/langfuse and prom-client are not in package.json
+- **Next**: Issue #9 (Langfuse), Issue #10 (Prometheus metrics)
+
 ## Langfuse Cloud — LLM/Agent Observability
 
 - **Tier**: Hobby (free) — 50,000 units/month, 2 users, 30-day retention

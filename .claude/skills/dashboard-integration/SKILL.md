@@ -3,6 +3,10 @@ name: dashboard-integration
 description: Mission Control integration patterns and time-box rules
 ---
 
+## Implementation Status
+- **Not yet implemented**: All dashboard modules are stubs (`src/dashboard/adapter.ts`, `event-bridge.ts`, `config.ts` all throw "Not implemented")
+- **Next**: Issue #11 — Mission Control integration (time-boxed to 2-3 hours)
+
 ## Mission Control (builderz-labs/mission-control)
 
 **WARNING: Alpha software** — APIs, database schemas, and config formats may change between releases. Pin to a specific release tag. Keep the adapter thin so breaking changes upstream don't cascade.
