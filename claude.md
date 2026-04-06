@@ -58,6 +58,10 @@ npm run dev          # Start MCP proxy (tsx)
 - **Security changes**: enter Plan Mode first for any changes to `src/security/` or `src/mcp-proxy/`
 - **Workflow**: issue → branch → tests → implement → PR → review → fix → merge
 
+## Learnings
+
+See @.learnings/LEARNING_INDEX.md for lessons learned from previous sessions.
+
 ## Key Paths
 
 - `src/mcp-proxy/` — proxy server, allowlist, sanitizer, logger, stdio bridge
