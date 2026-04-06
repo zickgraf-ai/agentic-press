@@ -114,7 +114,8 @@
 - **Worktree isolation** — always use `git worktree` when working on feature/fix branches.
 - **Branch naming** — `<type>/<issue-number>-<2-3-word-description>` where type is: `feat`, `fix`, `chore`, `refactor`, `docs`, `test`.
   - Examples: `feat/27-implement-hooks`, `chore/68-update-docs`, `fix/45-fix-network-issue`
-- **Workflow sequence**: (1) create GitHub issue → (2) create worktree branch with correct naming → (3) write failing tests → (4) implement → (5) refactor → (6) PR back to main.
+- **Code review before merge** — every PR must be reviewed before merging. Never merge without review. Use the pr-review-toolkit agents to run a review, then address findings before requesting merge.
+- **Workflow sequence**: (1) create GitHub issue → (2) create worktree branch with correct naming → (3) write failing tests → (4) implement → (5) refactor → (6) PR back to main → (7) review → (8) address findings → (9) merge after approval.
 
 ## Code Conventions
 - All source in `src/` with clear module boundaries
