@@ -4,12 +4,15 @@ import { checkAllowlist, type AllowlistConfig } from "./allowlist.js";
 import { checkPath } from "../security/path-guard.js";
 import { sanitize } from "./sanitizer.js";
 import { logAuditEntry, type AuditEntry } from "./logger.js";
+import type { StdioBridge } from "./stdio-bridge.js";
 
 export interface ProxyServerConfig {
   readonly port: number;
   readonly allowedTools: readonly string[];
   readonly logLevel: LogLevel;
   readonly workspaceRoot?: string;
+  readonly bridge?: StdioBridge;
+  readonly serverRoutes?: Record<string, string>; // tool pattern → server name
 }
 
 interface JsonRpcRequest {
@@ -64,12 +67,26 @@ function collectStrings(value: unknown): string[] {
   return [];
 }
 
+// Match a tool name against wildcard route patterns (e.g., "echo__*" matches "echo__read_file")
+function resolveRoute(toolName: string, routes: Record<string, string>): string | undefined {
+  // Exact match first
+  if (routes[toolName]) return routes[toolName];
+  // Wildcard match
+  for (const [pattern, serverName] of Object.entries(routes)) {
+    if (pattern.endsWith("*") && toolName.startsWith(pattern.slice(0, -1))) {
+      return serverName;
+    }
+  }
+  return undefined;
+}
+
 export function createProxyServer(config: ProxyServerConfig): Express {
   const app = express();
   app.use(express.json());
 
   const allowlistConfig: AllowlistConfig = { patterns: [...config.allowedTools] };
   const workspaceRoot = config.workspaceRoot ?? process.env.WORKSPACE_ROOT ?? process.cwd();
+  const { bridge, serverRoutes } = config;
 
   app.get("/health", (_req: Request, res: Response) => {
     res.json({ status: "ok", port: config.port });
@@ -150,19 +167,65 @@ export function createProxyServer(config: ProxyServerConfig): Express {
         }
       }
 
-      // 4. Forward to MCP server (stub — no backend yet)
-      // TODO: Wire to stdio bridge in integration (Issue #8)
-      const entry: AuditEntry = {
-        timestamp: new Date().toISOString(),
-        tool: toolName,
-        args: toolArgs,
-        status: "allowed",
-        flags: [],
-        durationMs: Date.now() - start,
-      };
-      logAuditEntry(entry);
+      // 4. Forward to MCP server via bridge
+      if (!bridge || !serverRoutes) {
+        const entry: AuditEntry = {
+          timestamp: new Date().toISOString(),
+          tool: toolName,
+          args: toolArgs,
+          status: "allowed",
+          flags: [],
+          durationMs: Date.now() - start,
+        };
+        logAuditEntry(entry);
+        res.json(jsonRpcError(requestId, -32603, `No MCP backend configured for tool "${toolName}"`));
+        return;
+      }
 
-      res.json(jsonRpcError(requestId, -32603, `No MCP backend configured for tool "${toolName}"`));
+      const serverName = resolveRoute(toolName, serverRoutes);
+      if (!serverName) {
+        const entry: AuditEntry = {
+          timestamp: new Date().toISOString(),
+          tool: toolName,
+          args: toolArgs,
+          status: "blocked",
+          flags: [],
+          durationMs: Date.now() - start,
+        };
+        logAuditEntry(entry);
+        res.json(jsonRpcError(requestId, -32600, `No route configured for tool "${toolName}"`));
+        return;
+      }
+
+      // Async forwarding — must handle promise
+      bridge
+        .call(serverName, "tools/call", params)
+        .then((result) => {
+          const entry: AuditEntry = {
+            timestamp: new Date().toISOString(),
+            tool: toolName,
+            args: toolArgs,
+            status: "allowed",
+            flags: [],
+            durationMs: Date.now() - start,
+          };
+          logAuditEntry(entry);
+          res.json({ jsonrpc: "2.0", id: requestId, result });
+        })
+        .catch((err) => {
+          const message = err instanceof Error ? err.message : "Bridge call failed";
+          const entry: AuditEntry = {
+            timestamp: new Date().toISOString(),
+            tool: toolName,
+            args: toolArgs,
+            status: "blocked",
+            flags: [],
+            durationMs: Date.now() - start,
+          };
+          logAuditEntry(entry);
+          res.json(jsonRpcError(requestId, -32603, message));
+        });
+      return; // Response handled in promise callbacks
     } catch (err) {
       const message = err instanceof Error ? err.message : "Internal server error";
       console.error("MCP proxy error:", err); // (#N-4)
