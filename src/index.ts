@@ -7,7 +7,11 @@ import type { LogLevel } from "./types.js";
 function parseServerDefs(): McpServerDef[] {
   const raw = process.env.MCP_SERVERS;
   if (!raw) return [];
-  return JSON.parse(raw) as McpServerDef[];
+  try {
+    return JSON.parse(raw) as McpServerDef[];
+  } catch (err) {
+    throw new Error(`Failed to parse MCP_SERVERS: ${err instanceof Error ? err.message : err}`);
+  }
 }
 
 // Parse tool→server routing from env: JSON object of pattern→serverName
@@ -15,7 +19,11 @@ function parseServerDefs(): McpServerDef[] {
 function parseServerRoutes(): Record<string, string> | undefined {
   const raw = process.env.SERVER_ROUTES;
   if (!raw) return undefined;
-  return JSON.parse(raw) as Record<string, string>;
+  try {
+    return JSON.parse(raw) as Record<string, string>;
+  } catch (err) {
+    throw new Error(`Failed to parse SERVER_ROUTES: ${err instanceof Error ? err.message : err}`);
+  }
 }
 
 const serverDefs = parseServerDefs();
@@ -38,20 +46,22 @@ const config: ProxyServerConfig = {
 const app = createProxyServer(config);
 
 // Bind 0.0.0.0 so the proxy is reachable from sbx sandboxes via host.docker.internal
-app.listen(config.port, "0.0.0.0", () => {
+const server = app.listen(config.port, "0.0.0.0", () => {
   console.log(`MCP proxy listening on 0.0.0.0:${config.port}`);
   if (!bridge) {
     console.log("No MCP_SERVERS configured — running in stub mode (no forwarding)");
   }
 });
 
-// Graceful shutdown
+// Graceful shutdown: close HTTP server first, then bridge
 function shutdown() {
-  if (bridge) {
-    bridge.shutdown().then(() => process.exit(0)).catch(() => process.exit(1));
-  } else {
-    process.exit(0);
-  }
+  server.close(() => {
+    if (bridge) {
+      bridge.shutdown().then(() => process.exit(0)).catch(() => process.exit(1));
+    } else {
+      process.exit(0);
+    }
+  });
 }
 
 process.on("SIGTERM", shutdown);

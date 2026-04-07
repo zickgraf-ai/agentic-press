@@ -48,7 +48,7 @@ trap cleanup EXIT
 
 assert_contains() {
   local label="$1" haystack="$2" needle="$3"
-  if echo "$haystack" | grep -q "$needle"; then
+  if echo "$haystack" | grep -Fq "$needle"; then
     echo "  PASS: $label"
     ((PASS_COUNT++))
   else
@@ -60,7 +60,7 @@ assert_contains() {
 
 assert_not_contains() {
   local label="$1" haystack="$2" needle="$3"
-  if echo "$haystack" | grep -q "$needle"; then
+  if echo "$haystack" | grep -Fq "$needle"; then
     echo "  FAIL: $label (unexpected '$needle' in response)"
     echo "  Got: $haystack"
     ((FAIL_COUNT++))
@@ -116,7 +116,7 @@ PROXY_PID=$!
 
 # Wait for proxy to be ready (up to 10s)
 for i in $(seq 1 20); do
-  if HEALTH=$(curl -s "http://127.0.0.1:${PROXY_PORT}/health" 2>/dev/null) && echo "$HEALTH" | grep -q '"ok"'; then
+  if HEALTH=$(curl -s "http://127.0.0.1:${PROXY_PORT}/health" 2>/dev/null) && echo "$HEALTH" | grep -Fq '"ok"'; then
     echo "Proxy healthy: $HEALTH (PID $PROXY_PID)"
     break
   fi
@@ -128,7 +128,7 @@ for i in $(seq 1 20); do
   sleep 0.5
 done
 
-if ! echo "${HEALTH:-}" | grep -q '"ok"'; then
+if ! echo "${HEALTH:-}" | grep -Fq '"ok"'; then
   echo "ERROR: Proxy health check timed out. Log:"
   cat "$AUDIT_LOG"
   exit 1

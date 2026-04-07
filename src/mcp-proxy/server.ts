@@ -1,6 +1,6 @@
 import express, { type Express, type Request, type Response, type NextFunction } from "express";
 import type { LogLevel } from "../types.js";
-import { checkAllowlist, type AllowlistConfig } from "./allowlist.js";
+import { checkAllowlist, matchesPattern, type AllowlistConfig } from "./allowlist.js";
 import { checkPath } from "../security/path-guard.js";
 import { sanitize } from "./sanitizer.js";
 import { logAuditEntry, type AuditEntry } from "./logger.js";
@@ -67,15 +67,10 @@ function collectStrings(value: unknown): string[] {
   return [];
 }
 
-// Match a tool name against wildcard route patterns (e.g., "echo__*" matches "echo__read_file")
+// Match a tool name against route patterns using the same wildcard logic as the allowlist
 function resolveRoute(toolName: string, routes: Record<string, string>): string | undefined {
-  // Exact match first
-  if (routes[toolName]) return routes[toolName];
-  // Wildcard match
   for (const [pattern, serverName] of Object.entries(routes)) {
-    if (pattern.endsWith("*") && toolName.startsWith(pattern.slice(0, -1))) {
-      return serverName;
-    }
+    if (matchesPattern(toolName, pattern)) return serverName;
   }
   return undefined;
 }
@@ -95,6 +90,10 @@ export function createProxyServer(config: ProxyServerConfig): Express {
   app.post("/mcp", (req: Request, res: Response) => {
     const start = Date.now();
     let requestId: number | string | null = null; // Hoisted for catch block (#N-3)
+
+    function audit(tool: string, args: Record<string, unknown>, status: AuditEntry["status"], flags: AuditEntry["flags"] = []) {
+      logAuditEntry({ timestamp: new Date().toISOString(), tool, args, status, flags, durationMs: Date.now() - start });
+    }
 
     try {
       const body = req.body;
@@ -119,15 +118,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
       // 1. Allowlist check
       const allowResult = checkAllowlist(toolName, allowlistConfig);
       if (!allowResult.allowed) {
-        const entry: AuditEntry = {
-          timestamp: new Date().toISOString(),
-          tool: toolName,
-          args: toolArgs,
-          status: "blocked",
-          flags: [],
-          durationMs: Date.now() - start,
-        };
-        logAuditEntry(entry);
+        audit(toolName, toolArgs, "blocked");
         res.json(jsonRpcError(requestId, -32600, allowResult.reason));
         return;
       }
@@ -135,15 +126,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
       // 2. Sanitize individual string values in arguments (#N-2)
       const sanitizeResult = sanitizeArgs(toolArgs);
       if (sanitizeResult && sanitizeResult.flags.length > 0) {
-        const entry: AuditEntry = {
-          timestamp: new Date().toISOString(),
-          tool: toolName,
-          args: toolArgs,
-          status: "flagged",
-          flags: sanitizeResult.flags,
-          durationMs: Date.now() - start,
-        };
-        logAuditEntry(entry);
+        audit(toolName, toolArgs, "flagged", sanitizeResult.flags);
         res.json(jsonRpcError(requestId, -32600, `Injection pattern detected in arguments: ${sanitizeResult.flags.map(f => f.pattern).join(", ")}`));
         return;
       }
@@ -153,15 +136,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
       for (const p of paths) {
         const pathResult = checkPath(p, { workspaceRoot });
         if (!pathResult.allowed) {
-          const entry: AuditEntry = {
-            timestamp: new Date().toISOString(),
-            tool: toolName,
-            args: toolArgs,
-            status: "blocked",
-            flags: [],
-            durationMs: Date.now() - start,
-          };
-          logAuditEntry(entry);
+          audit(toolName, toolArgs, "blocked");
           res.json(jsonRpcError(requestId, -32600, `Blocked path: ${pathResult.reason}`));
           return;
         }
@@ -169,30 +144,14 @@ export function createProxyServer(config: ProxyServerConfig): Express {
 
       // 4. Forward to MCP server via bridge
       if (!bridge || !serverRoutes) {
-        const entry: AuditEntry = {
-          timestamp: new Date().toISOString(),
-          tool: toolName,
-          args: toolArgs,
-          status: "allowed",
-          flags: [],
-          durationMs: Date.now() - start,
-        };
-        logAuditEntry(entry);
+        audit(toolName, toolArgs, "allowed");
         res.json(jsonRpcError(requestId, -32603, `No MCP backend configured for tool "${toolName}"`));
         return;
       }
 
       const serverName = resolveRoute(toolName, serverRoutes);
       if (!serverName) {
-        const entry: AuditEntry = {
-          timestamp: new Date().toISOString(),
-          tool: toolName,
-          args: toolArgs,
-          status: "blocked",
-          flags: [],
-          durationMs: Date.now() - start,
-        };
-        logAuditEntry(entry);
+        audit(toolName, toolArgs, "blocked");
         res.json(jsonRpcError(requestId, -32600, `No route configured for tool "${toolName}"`));
         return;
       }
@@ -201,28 +160,12 @@ export function createProxyServer(config: ProxyServerConfig): Express {
       bridge
         .call(serverName, "tools/call", params)
         .then((result) => {
-          const entry: AuditEntry = {
-            timestamp: new Date().toISOString(),
-            tool: toolName,
-            args: toolArgs,
-            status: "allowed",
-            flags: [],
-            durationMs: Date.now() - start,
-          };
-          logAuditEntry(entry);
+          audit(toolName, toolArgs, "allowed");
           res.json({ jsonrpc: "2.0", id: requestId, result });
         })
         .catch((err) => {
           const message = err instanceof Error ? err.message : "Bridge call failed";
-          const entry: AuditEntry = {
-            timestamp: new Date().toISOString(),
-            tool: toolName,
-            args: toolArgs,
-            status: "blocked",
-            flags: [],
-            durationMs: Date.now() - start,
-          };
-          logAuditEntry(entry);
+          audit(toolName, toolArgs, "blocked");
           res.json(jsonRpcError(requestId, -32603, message));
         });
       return; // Response handled in promise callbacks

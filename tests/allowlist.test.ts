@@ -147,6 +147,19 @@ describe("tool allowlist", () => {
       expect(shallow.allowed).toBe(true);
       expect(deep.allowed).toBe(true);
     });
+
+    it("supports underscore-separated wildcard: echo__*", () => {
+      const config: AllowlistConfig = { patterns: ["echo__*"] };
+      expect(checkAllowlist("echo__read_file", config).allowed).toBe(true);
+      expect(checkAllowlist("echo__write_file", config).allowed).toBe(true);
+      expect(checkAllowlist("other__read", config).allowed).toBe(false);
+    });
+
+    it("supports any separator before wildcard: prefix-*", () => {
+      const config: AllowlistConfig = { patterns: ["mcp-server-*"] };
+      expect(checkAllowlist("mcp-server-read", config).allowed).toBe(true);
+      expect(checkAllowlist("mcp-other-read", config).allowed).toBe(false);
+    });
   });
 
   // ── Malformed config ───────────────────────────────────────────────

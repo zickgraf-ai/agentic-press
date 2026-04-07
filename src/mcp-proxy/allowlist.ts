@@ -6,16 +6,23 @@ export type AllowlistResult =
   | { readonly allowed: true }
   | { readonly allowed: false; readonly reason: string };
 
-function matchesPattern(toolName: string, pattern: string): boolean {
+/** Match a tool name against a pattern. Supports:
+ *  - Exact match: "echo__read_file" matches "echo__read_file"
+ *  - Catch-all: "*" matches everything
+ *  - Suffix wildcard: "echo__*" matches "echo__read_file", "fs.*" matches "fs.readFile"
+ *    The wildcard must be the last character; everything before it is the prefix.
+ */
+export function matchesPattern(toolName: string, pattern: string): boolean {
   // Empty or whitespace-only patterns never match
   if (!pattern || !pattern.trim()) return false;
 
   // Catch-all: bare "*" matches everything
   if (pattern === "*") return true;
 
-  // Wildcard suffix: "prefix.*" or "prefix.**" matches "prefix.anything"
-  if (pattern.endsWith(".*") || pattern.endsWith(".**")) {
-    const prefix = pattern.replace(/\.\*{1,2}$/, ".");
+  // Suffix wildcard: anything ending in "*" — the prefix is everything before the "*"
+  // Collapse trailing "**" to "*" (no glob recursion distinction)
+  if (pattern.endsWith("*")) {
+    const prefix = pattern.replace(/\*+$/, "");
     return toolName.startsWith(prefix);
   }
 
