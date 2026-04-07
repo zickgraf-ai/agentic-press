@@ -5,6 +5,7 @@ import { checkPath } from "../security/path-guard.js";
 import { sanitize } from "./sanitizer.js";
 import { logAuditEntry, type AuditEntry } from "./logger.js";
 import type { StdioBridge } from "./stdio-bridge.js";
+import { createNoopTracer, type Tracer, type TraceHandle } from "../observability/langfuse.js";
 
 export interface ProxyServerConfig {
   readonly port: number;
@@ -13,6 +14,7 @@ export interface ProxyServerConfig {
   readonly workspaceRoot?: string;
   readonly bridge?: StdioBridge;
   readonly serverRoutes?: Record<string, string>; // tool pattern → server name
+  readonly tracer?: Tracer;
 }
 
 interface JsonRpcRequest {
@@ -93,6 +95,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
   const workspaceRoot = config.workspaceRoot ?? process.env.WORKSPACE_ROOT ?? process.cwd();
   const { bridge } = config;
   const sortedRoutes = config.serverRoutes ? sortRoutes(config.serverRoutes) : undefined;
+  const tracer: Tracer = config.tracer ?? createNoopTracer();
 
   app.get("/health", (_req: Request, res: Response) => {
     res.json({ status: "ok", port: config.port });
@@ -101,9 +104,30 @@ export function createProxyServer(config: ProxyServerConfig): Express {
   app.post("/mcp", (req: Request, res: Response) => {
     const start = Date.now();
     let requestId: number | string | null = null; // Hoisted for catch block (#N-3)
+    let traceHandle: TraceHandle | undefined;
+    let traceEnded = false;
 
     function audit(tool: string, args: Record<string, unknown>, status: AuditEntry["status"], flags: AuditEntry["flags"] = []) {
       logAuditEntry({ timestamp: new Date().toISOString(), tool, args, status, flags, durationMs: Date.now() - start });
+    }
+
+    // Emit a span + close the trace exactly once. Tracing failures must never
+    // surface to the client, so this helper guards against double-close and
+    // delegates SDK error handling to the tracer implementation itself.
+    function trace(
+      tool: string,
+      status: AuditEntry["status"],
+      flags?: readonly unknown[]
+    ) {
+      if (!traceHandle || traceEnded) return;
+      tracer.spanToolCall(traceHandle, {
+        tool,
+        status,
+        durationMs: Date.now() - start,
+        flags,
+      });
+      tracer.endTrace(traceHandle, { outcome: status });
+      traceEnded = true;
     }
 
     try {
@@ -126,10 +150,18 @@ export function createProxyServer(config: ProxyServerConfig): Express {
       const toolName = params.name as string;
       const toolArgs = (params.arguments ?? {}) as Record<string, unknown>;
 
+      // Start the trace once we know which tool was requested.
+      traceHandle = tracer.startTrace({
+        name: `mcp.request:${toolName}`,
+        sessionId: typeof requestId === "string" ? requestId : String(requestId),
+        metadata: { method },
+      });
+
       // 1. Allowlist check
       const allowResult = checkAllowlist(toolName, allowlistConfig);
       if (!allowResult.allowed) {
         audit(toolName, toolArgs, "blocked");
+        trace(toolName, "blocked");
         res.json(jsonRpcError(requestId, -32600, allowResult.reason));
         return;
       }
@@ -138,6 +170,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
       const sanitizeResult = sanitizeArgs(toolArgs);
       if (sanitizeResult && sanitizeResult.flags.length > 0) {
         audit(toolName, toolArgs, "flagged", sanitizeResult.flags);
+        trace(toolName, "flagged", sanitizeResult.flags.map((f) => f.pattern));
         res.json(jsonRpcError(requestId, -32600, `Injection pattern detected in arguments: ${sanitizeResult.flags.map(f => f.pattern).join(", ")}`));
         return;
       }
@@ -148,6 +181,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
         const pathResult = checkPath(p, { workspaceRoot });
         if (!pathResult.allowed) {
           audit(toolName, toolArgs, "blocked");
+          trace(toolName, "blocked");
           res.json(jsonRpcError(requestId, -32600, `Blocked path: ${pathResult.reason}`));
           return;
         }
@@ -156,6 +190,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
       // 4. Forward to MCP server via bridge
       if (!bridge || !sortedRoutes) {
         audit(toolName, toolArgs, "allowed");
+        trace(toolName, "allowed");
         res.json(jsonRpcError(requestId, -32603, `No MCP backend configured for tool "${toolName}"`));
         return;
       }
@@ -163,16 +198,21 @@ export function createProxyServer(config: ProxyServerConfig): Express {
       const serverName = resolveRoute(toolName, sortedRoutes);
       if (!serverName) {
         audit(toolName, toolArgs, "blocked");
+        trace(toolName, "blocked");
         res.json(jsonRpcError(requestId, -32600, `No route configured for tool "${toolName}"`));
         return;
       }
 
-      // Async forwarding with defensive guards
+      // Async forwarding with defensive guards.
+      // The trace MUST be closed in both branches — we use a helper above so a
+      // promise that forgets to call it is impossible to write here without
+      // also forgetting to send a response.
       bridge
         .call(serverName, "tools/call", params)
         .then((result) => {
           if (res.headersSent) return;
           audit(toolName, toolArgs, "allowed");
+          trace(toolName, "allowed");
           res.json({ jsonrpc: "2.0", id: requestId, result });
         })
         .catch((err) => {
@@ -184,12 +224,22 @@ export function createProxyServer(config: ProxyServerConfig): Express {
           } catch (auditErr) {
             console.error("Audit logging failed:", auditErr);
           }
+          trace(toolName, "error");
           res.json(jsonRpcError(requestId, -32603, message));
         });
       return; // Response handled in promise callbacks
     } catch (err) {
       const message = err instanceof Error ? err.message : "Internal server error";
       console.error("MCP proxy error:", err); // (#N-4)
+      // Best-effort: end any in-flight trace before bailing out.
+      if (traceHandle && !traceEnded) {
+        try {
+          tracer.endTrace(traceHandle, { outcome: "error" });
+        } catch (traceErr) {
+          console.error("Trace end failed:", traceErr);
+        }
+        traceEnded = true;
+      }
       res.status(500).json(jsonRpcError(requestId, -32603, message));
     }
   });

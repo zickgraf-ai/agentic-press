@@ -1,6 +1,8 @@
 import { createProxyServer, type ProxyServerConfig } from "./mcp-proxy/server.js";
 import { createStdioBridge, type McpServerDef, type StdioBridge } from "./mcp-proxy/stdio-bridge.js";
 import { parseLogLevel } from "./types.js";
+import { loadLangfuseConfig } from "./observability/config.js";
+import { createTracer, type Tracer } from "./observability/langfuse.js";
 
 // Parse MCP server definitions from env: JSON array of {name, command, args, env?}
 // Example: MCP_SERVERS='[{"name":"fs","command":"npx","args":["-y","@anthropic-ai/mcp-filesystem"]}]'
@@ -41,12 +43,22 @@ if (isNaN(port) || port < 1 || port > 65535) {
   throw new Error(`Invalid MCP_PROXY_PORT: "${process.env.MCP_PROXY_PORT}" — must be 1-65535`);
 }
 
+// Build the tracer up-front. createTracer is async because the langfuse SDK
+// is loaded via dynamic import on the enabled path; the no-op path resolves
+// synchronously so this top-level await is effectively free when disabled.
+const langfuseConfig = loadLangfuseConfig(process.env);
+const tracer: Tracer = await createTracer(langfuseConfig);
+if (langfuseConfig.enabled) {
+  console.log(`Langfuse tracing enabled (host: ${langfuseConfig.host})`);
+}
+
 const config: ProxyServerConfig = {
   port,
   allowedTools: (process.env.ALLOWED_TOOLS ?? "").split(",").filter(Boolean),
   logLevel,
   bridge,
   serverRoutes,
+  tracer,
 };
 
 const app = createProxyServer(config);
@@ -59,7 +71,7 @@ const server = app.listen(config.port, "0.0.0.0", () => {
   }
 });
 
-// Graceful shutdown: close HTTP server first, then bridge, with 5s force-exit
+// Graceful shutdown: close HTTP server first, then bridge + tracer, with 5s force-exit
 function shutdown(signal: string) {
   console.log(`Received ${signal}, shutting down...`);
 
@@ -71,14 +83,15 @@ function shutdown(signal: string) {
   forceTimer.unref(); // Don't keep process alive just for the timer
 
   server.close(() => {
-    if (bridge) {
-      bridge.shutdown().then(() => process.exit(0)).catch((err) => {
-        console.error("Bridge shutdown failed:", err);
+    const tasks: Promise<unknown>[] = [];
+    if (bridge) tasks.push(bridge.shutdown());
+    tasks.push(tracer.shutdown());
+    Promise.all(tasks)
+      .then(() => process.exit(0))
+      .catch((err) => {
+        console.error("Shutdown failed:", err);
         process.exit(1);
       });
-    } else {
-      process.exit(0);
-    }
   });
 }
 
