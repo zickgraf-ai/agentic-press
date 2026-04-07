@@ -21,8 +21,10 @@ export function matchesPattern(toolName: string, pattern: string): boolean {
 
   // Suffix wildcard: anything ending in "*" — the prefix is everything before the "*"
   // Collapse trailing "**" to "*" (no glob recursion distinction)
+  // Require non-empty prefix to prevent "**" from matching everything (use bare "*" for catch-all)
   if (pattern.endsWith("*")) {
     const prefix = pattern.replace(/\*+$/, "");
+    if (prefix.length === 0) return false; // "**" without prefix — reject, use "*" for catch-all
     return toolName.startsWith(prefix);
   }
 

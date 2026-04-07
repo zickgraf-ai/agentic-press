@@ -35,8 +35,13 @@ if (serverDefs.length > 0) {
   console.log(`Stdio bridge created with ${serverDefs.length} server(s): ${serverDefs.map((s) => s.name).join(", ")}`);
 }
 
+const port = parseInt(process.env.MCP_PROXY_PORT ?? "18923", 10);
+if (isNaN(port) || port < 1 || port > 65535) {
+  throw new Error(`Invalid MCP_PROXY_PORT: "${process.env.MCP_PROXY_PORT}" — must be 1-65535`);
+}
+
 const config: ProxyServerConfig = {
-  port: parseInt(process.env.MCP_PROXY_PORT ?? "18923", 10),
+  port,
   allowedTools: (process.env.ALLOWED_TOOLS ?? "").split(",").filter(Boolean),
   logLevel: (process.env.LOG_LEVEL ?? "info") as LogLevel,
   bridge,
@@ -53,19 +58,28 @@ const server = app.listen(config.port, "0.0.0.0", () => {
   }
 });
 
-// Graceful shutdown: close HTTP server first, then bridge
-function shutdown() {
+// Graceful shutdown: close HTTP server first, then bridge, with 5s force-exit
+function shutdown(signal: string) {
+  console.log(`Received ${signal}, shutting down...`);
+
+  // Force exit after 5s if graceful shutdown stalls
+  const forceTimer = setTimeout(() => {
+    console.error("Shutdown timed out after 5s, forcing exit");
+    process.exit(1);
+  }, 5000);
+  forceTimer.unref(); // Don't keep process alive just for the timer
+
   server.close(() => {
     if (bridge) {
       bridge.shutdown().then(() => process.exit(0)).catch((err) => {
-      console.error("Bridge shutdown failed:", err);
-      process.exit(1);
-    });
+        console.error("Bridge shutdown failed:", err);
+        process.exit(1);
+      });
     } else {
       process.exit(0);
     }
   });
 }
 
-process.on("SIGTERM", shutdown);
-process.on("SIGINT", shutdown);
+process.on("SIGTERM", () => shutdown("SIGTERM"));
+process.on("SIGINT", () => shutdown("SIGINT"));

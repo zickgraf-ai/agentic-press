@@ -160,6 +160,17 @@ describe("tool allowlist", () => {
       expect(checkAllowlist("mcp-server-read", config).allowed).toBe(true);
       expect(checkAllowlist("mcp-other-read", config).allowed).toBe(false);
     });
+
+    it("bare '**' does NOT bypass allowlist (C-3)", () => {
+      const config: AllowlistConfig = { patterns: ["**"] };
+      expect(checkAllowlist("anything", config).allowed).toBe(false);
+      expect(checkAllowlist("Read", config).allowed).toBe(false);
+    });
+
+    it("'***' does NOT bypass allowlist", () => {
+      const config: AllowlistConfig = { patterns: ["***"] };
+      expect(checkAllowlist("anything", config).allowed).toBe(false);
+    });
   });
 
   // ── Malformed config ───────────────────────────────────────────────

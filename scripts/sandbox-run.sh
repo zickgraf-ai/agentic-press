@@ -70,8 +70,17 @@ assert_not_contains() {
   fi
 }
 
+check_proxy_alive() {
+  if ! kill -0 "$PROXY_PID" 2>/dev/null; then
+    echo "ERROR: Proxy (PID $PROXY_PID) died unexpectedly. Audit log:"
+    cat "$AUDIT_LOG"
+    exit 1
+  fi
+}
+
 mcp_call_from_sandbox() {
   local id="$1" tool="$2" args="$3"
+  check_proxy_alive
   sbx exec "$SANDBOX_NAME" curl -s -X POST \
     "http://host.docker.internal:${PROXY_PORT}/mcp" \
     -H "Content-Type: application/json" \

@@ -67,9 +67,16 @@ function collectStrings(value: unknown): string[] {
   return [];
 }
 
-// Match a tool name against route patterns using the same wildcard logic as the allowlist
-function resolveRoute(toolName: string, routes: Record<string, string>): string | undefined {
-  for (const [pattern, serverName] of Object.entries(routes)) {
+// Match a tool name against route patterns using the same wildcard logic as the allowlist.
+// Routes are sorted by specificity: exact matches first, then longest prefix first.
+export function resolveRoute(toolName: string, routes: Record<string, string>): string | undefined {
+  const sorted = Object.entries(routes).sort(([a], [b]) => {
+    const aWild = a.endsWith("*");
+    const bWild = b.endsWith("*");
+    if (aWild !== bWild) return aWild ? 1 : -1; // Exact matches first
+    return b.length - a.length; // Longer patterns first
+  });
+  for (const [pattern, serverName] of sorted) {
     if (matchesPattern(toolName, pattern)) return serverName;
   }
   return undefined;
@@ -156,17 +163,23 @@ export function createProxyServer(config: ProxyServerConfig): Express {
         return;
       }
 
-      // Async forwarding — must handle promise
+      // Async forwarding with defensive guards
       bridge
         .call(serverName, "tools/call", params)
         .then((result) => {
+          if (res.headersSent) return;
           audit(toolName, toolArgs, "allowed");
           res.json({ jsonrpc: "2.0", id: requestId, result });
         })
         .catch((err) => {
+          if (res.headersSent) return;
           const message = err instanceof Error ? err.message : "Bridge call failed";
           console.error(`Bridge call to "${serverName}" failed:`, err);
-          audit(toolName, toolArgs, "error");
+          try {
+            audit(toolName, toolArgs, "error");
+          } catch (auditErr) {
+            console.error("Audit logging failed:", auditErr);
+          }
           res.json(jsonRpcError(requestId, -32603, message));
         });
       return; // Response handled in promise callbacks
