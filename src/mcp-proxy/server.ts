@@ -165,7 +165,8 @@ export function createProxyServer(config: ProxyServerConfig): Express {
         })
         .catch((err) => {
           const message = err instanceof Error ? err.message : "Bridge call failed";
-          audit(toolName, toolArgs, "blocked");
+          console.error(`Bridge call to "${serverName}" failed:`, err);
+          audit(toolName, toolArgs, "error");
           res.json(jsonRpcError(requestId, -32603, message));
         });
       return; // Response handled in promise callbacks

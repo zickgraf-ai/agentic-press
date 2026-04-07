@@ -143,8 +143,11 @@ sbx create --name "$SANDBOX_NAME" shell "$PROJECT_DIR"
 POLICY_OUTPUT=$(sbx policy allow network "host.docker.internal:${PROXY_PORT},localhost:${PROXY_PORT}" 2>&1)
 echo "$POLICY_OUTPUT"
 # Capture all policy IDs for cleanup
-POLICY_IDS=$(echo "$POLICY_OUTPUT" | grep -oE '[0-9a-f-]{36}')
-POLICY_ID=$(echo "$POLICY_IDS" | head -1)  # For backward compat
+POLICY_IDS=$(echo "$POLICY_OUTPUT" | grep -oE '[0-9a-f-]{36}' || true)
+if [[ -z "$POLICY_IDS" ]]; then
+  echo "WARNING: Could not extract network policy IDs. Manual cleanup may be needed."
+  echo "sbx output: $POLICY_OUTPUT"
+fi
 echo "Sandbox created and network policy set"
 echo ""
 

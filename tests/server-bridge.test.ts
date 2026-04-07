@@ -15,22 +15,24 @@ process.stdin.on("data", (chunk) => {
   buf = lines.pop() || "";
   for (const line of lines) {
     if (!line.trim()) continue;
-    try {
-      const req = JSON.parse(line);
-      if (req.method === "tools/call") {
-        const res = {
-          jsonrpc: "2.0",
-          id: req.id,
-          result: {
-            content: [{ type: "text", text: "echo: " + JSON.stringify(req.params) }],
-          },
-        };
-        process.stdout.write(JSON.stringify(res) + "\\n");
-      } else {
-        const res = { jsonrpc: "2.0", id: req.id, result: { method: req.method } };
-        process.stdout.write(JSON.stringify(res) + "\\n");
-      }
-    } catch {}
+    let req;
+    try { req = JSON.parse(line); } catch (e) {
+      process.stderr.write("echo-test-server: invalid JSON: " + e.message + "\\n");
+      continue;
+    }
+    if (req.method === "tools/call") {
+      const res = {
+        jsonrpc: "2.0",
+        id: req.id,
+        result: {
+          content: [{ type: "text", text: "echo: " + JSON.stringify(req.params) }],
+        },
+      };
+      process.stdout.write(JSON.stringify(res) + "\\n");
+    } else {
+      const res = { jsonrpc: "2.0", id: req.id, result: { method: req.method } };
+      process.stdout.write(JSON.stringify(res) + "\\n");
+    }
   }
 });
 `;

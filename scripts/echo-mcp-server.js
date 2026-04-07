@@ -9,16 +9,20 @@ process.stdin.on("data", (chunk) => {
   buf = lines.pop() || "";
   for (const line of lines) {
     if (!line.trim()) continue;
+    let req;
     try {
-      const req = JSON.parse(line);
-      const res = {
-        jsonrpc: "2.0",
-        id: req.id,
-        result: {
-          content: [{ type: "text", text: "echo: " + JSON.stringify(req.params) }],
-        },
-      };
-      process.stdout.write(JSON.stringify(res) + "\n");
-    } catch {}
+      req = JSON.parse(line);
+    } catch (e) {
+      process.stderr.write(`echo-mcp-server: invalid JSON: ${e.message}\n`);
+      continue;
+    }
+    const res = {
+      jsonrpc: "2.0",
+      id: req.id,
+      result: {
+        content: [{ type: "text", text: "echo: " + JSON.stringify(req.params) }],
+      },
+    };
+    process.stdout.write(JSON.stringify(res) + "\n");
   }
 });

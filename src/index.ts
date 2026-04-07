@@ -57,7 +57,10 @@ const server = app.listen(config.port, "0.0.0.0", () => {
 function shutdown() {
   server.close(() => {
     if (bridge) {
-      bridge.shutdown().then(() => process.exit(0)).catch(() => process.exit(1));
+      bridge.shutdown().then(() => process.exit(0)).catch((err) => {
+      console.error("Bridge shutdown failed:", err);
+      process.exit(1);
+    });
     } else {
       process.exit(0);
     }
