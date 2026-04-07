@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { levelAtLeast, type LogLevel } from "../types.js";
 
 export interface McpServerDef {
   name: string;
@@ -15,6 +16,14 @@ export interface ProcessInfo {
 }
 
 export interface StdioBridgeOptions {
+  /** Minimum severity of bridge diagnostic logs. Default: "info". */
+  readonly logLevel?: LogLevel;
+  /**
+   * Number of initial non-JSON stdout lines to tolerate before assuming the spawn
+   * is misconfigured (wrong binary, wrong fd, etc.) and rejecting pending calls.
+   * Default: 5. Set to 0 to disable.
+   */
+  readonly failFastNonJsonLines?: number;
   /** Milliseconds to wait for graceful exit (SIGTERM) before SIGKILL. Default: 5000. */
   readonly shutdownGracePeriodMs?: number;
   /**
@@ -46,6 +55,13 @@ interface ManagedProcess {
   nextId: number;
   pending: Map<number, PendingHandler>;
   buffer: string;
+  // Counters for non-JSON stdout (used for one-shot warning + fail-fast)
+  nonJsonLinesSeen: number;
+  jsonLinesSeen: number;
+  warnedAboutNonJson: boolean;
+  // Set when fail-fast triggered: the spawn is permanently broken and should
+  // never be reused. Subsequent call() attempts will reject synchronously.
+  brokenReason: string | null;
 }
 
 function rejectAllPending(managed: ManagedProcess, error: Error): void {
@@ -56,7 +72,65 @@ function rejectAllPending(managed: ManagedProcess, error: Error): void {
   managed.pending.clear();
 }
 
-function spawnServer(def: McpServerDef): ManagedProcess {
+/**
+ * Handle a non-JSON line from a child server's stdout. Non-JSON on stdout is a
+ * protocol violation on the bridge's transport channel — stderr is inherited
+ * separately, so anything that lands here is wrong-fd output, a crash dump, or
+ * a misconfigured spawn. Behavior:
+ *  - At "debug" level: log every non-JSON line in full.
+ *  - At any level (info/warn/error): emit a ONE-SHOT warning the first time
+ *    non-JSON is seen for a given server. This is the highest-value diagnostic
+ *    in the bridge — it converts mystery 30s timeouts into actionable signal.
+ *  - If the first N stdout lines are all non-JSON (no JSON seen yet), assume
+ *    the spawn is broken and reject all pending calls with an actionable error.
+ */
+function handleNonJsonLine(
+  managed: ManagedProcess,
+  line: string,
+  logLevel: LogLevel,
+  failFastNonJsonLines: number
+): void {
+  const name = managed.def.name;
+  const truncated = line.slice(0, 200);
+
+  if (levelAtLeast(logLevel, "debug")) {
+    console.error(`[stdio-bridge] Non-JSON line from "${name}": ${truncated}`);
+  } else if (!managed.warnedAboutNonJson) {
+    // One-shot per-server warning — always emitted regardless of log level.
+    // A protocol violation on the transport channel is never something an
+    // operator wants silently dropped.
+    console.error(
+      `[stdio-bridge] WARN: Non-JSON output detected on "${name}" stdout ` +
+        `(set LOG_LEVEL=debug for all lines): ${truncated}`
+    );
+    managed.warnedAboutNonJson = true;
+  }
+
+  // Fail-fast: if we've seen N non-JSON lines and zero JSON lines, the spawn is broken.
+  // Mark the process as permanently broken, kill it, and reject pending calls.
+  // getOrSpawn() checks brokenReason and rejects subsequent call() attempts
+  // synchronously instead of letting them accumulate against a zombie process.
+  if (
+    !managed.brokenReason &&
+    failFastNonJsonLines > 0 &&
+    managed.nonJsonLinesSeen >= failFastNonJsonLines &&
+    managed.jsonLinesSeen === 0
+  ) {
+    managed.brokenReason =
+      `Server "${name}" emitted ${managed.nonJsonLinesSeen} non-JSON lines and no valid JSON-RPC frames — ` +
+      `likely a misconfigured spawn (wrong binary, wrong fd, or crash on startup). ` +
+      `Set LOG_LEVEL=debug to see the raw output.`;
+    rejectAllPending(managed, new Error(managed.brokenReason));
+    // Kill the broken process. Tolerate ESRCH/EPERM — child may have already died.
+    try {
+      managed.proc.kill();
+    } catch (err) {
+      console.error(`[stdio-bridge] Failed to kill broken server "${name}":`, err);
+    }
+  }
+}
+
+function spawnServer(def: McpServerDef, logLevel: LogLevel, failFastNonJsonLines: number): ManagedProcess {
   const proc = spawn(def.command, def.args, {
     stdio: ["pipe", "pipe", "inherit"], // stderr → inherit, not piped (#H-1)
     env: { ...process.env, ...def.env },
@@ -68,6 +142,10 @@ function spawnServer(def: McpServerDef): ManagedProcess {
     nextId: 1,
     pending: new Map(),
     buffer: "",
+    nonJsonLinesSeen: 0,
+    jsonLinesSeen: 0,
+    warnedAboutNonJson: false,
+    brokenReason: null,
   };
 
   // Handle spawn errors (ENOENT, permission denied) (#C-3)
@@ -96,10 +174,12 @@ function spawnServer(def: McpServerDef): ManagedProcess {
         try {
           msg = JSON.parse(line);
         } catch {
-          console.error(`[stdio-bridge] Non-JSON line from "${def.name}": ${line.slice(0, 200)}`);
+          managed.nonJsonLinesSeen++;
+          handleNonJsonLine(managed, line, logLevel, failFastNonJsonLines);
           continue;
         }
 
+        managed.jsonLinesSeen++;
         if (msg.id !== undefined && managed.pending.has(msg.id as number)) {
           const handler = managed.pending.get(msg.id as number)!;
           managed.pending.delete(msg.id as number);
@@ -127,6 +207,9 @@ function spawnServer(def: McpServerDef): ManagedProcess {
 }
 
 export function createStdioBridge(servers: McpServerDef[], options: StdioBridgeOptions = {}): StdioBridge {
+  // Resolve defaults once at construction time so all consumers see the same values
+  const logLevel: LogLevel = options.logLevel ?? "info";
+  const failFastNonJsonLines = options.failFastNonJsonLines ?? 5;
   const gracePeriodMs = options.shutdownGracePeriodMs ?? 5000;
   const hardCeilingMs = options.shutdownHardCeilingMs ?? 2000;
   const processes = new Map<string, ManagedProcess>();
@@ -138,6 +221,12 @@ export function createStdioBridge(servers: McpServerDef[], options: StdioBridgeO
 
   function getOrSpawn(name: string): ManagedProcess {
     const existing = processes.get(name);
+    // A broken process is permanently dead — refuse to use it. The caller will
+    // see the brokenReason in their rejection. We deliberately do NOT respawn:
+    // a misconfigured spawn won't fix itself, and respawning would waste time.
+    if (existing && existing.brokenReason) {
+      throw new Error(existing.brokenReason);
+    }
     if (existing && existing.proc.exitCode === null) return existing;
 
     // Reject old pending entries before replacing (#H-4)
@@ -148,13 +237,15 @@ export function createStdioBridge(servers: McpServerDef[], options: StdioBridgeO
     const def = definitions.get(name);
     if (!def) throw new Error(`Server "${name}" not found or not configured`);
 
-    const managed = spawnServer(def);
+    const managed = spawnServer(def, logLevel, failFastNonJsonLines);
     processes.set(name, managed);
     return managed;
   }
 
   return {
     async call(serverName: string, method: string, params: unknown): Promise<unknown> {
+      // getOrSpawn throws synchronously for broken/missing servers — let it propagate
+      // as a rejected promise via the async function wrapper.
       const managed = getOrSpawn(serverName);
       const id = managed.nextId++;
 

@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { createStdioBridge, type McpServerDef } from "../src/mcp-proxy/stdio-bridge.js";
 
 describe("stdio bridge", () => {
@@ -216,6 +216,226 @@ describe("stdio bridge", () => {
       const shutdownPromise = bridge.shutdown();
       await expect(callPromise).rejects.toThrow(/shutting down/i);
       await shutdownPromise;
+    }, 10000);
+  });
+
+  // Helper: a server that emits a banner line on stdout, then echoes JSON-RPC requests.
+  function makeBannerServer(name: string, banner = "Starting up..."): McpServerDef {
+    return {
+      name,
+      command: "node",
+      args: [
+        "-e",
+        `
+        process.stdout.write(${JSON.stringify(banner)} + "\\n");
+        process.stdin.setEncoding("utf8");
+        let buf = "";
+        process.stdin.on("data", (chunk) => {
+          buf += chunk;
+          const lines = buf.split("\\n");
+          buf = lines.pop() || "";
+          for (const line of lines) {
+            if (!line.trim()) continue;
+            try {
+              const req = JSON.parse(line);
+              const res = { jsonrpc: "2.0", id: req.id, result: { ok: true } };
+              process.stdout.write(JSON.stringify(res) + "\\n");
+            } catch {}
+          }
+        });
+        `,
+      ],
+    };
+  }
+
+  /** Returns console.error calls that mention the bridge's "Non-JSON" diagnostic. */
+  function nonJsonLogs(spy: ReturnType<typeof vi.spyOn>): unknown[][] {
+    return spy.mock.calls.filter(
+      (args) => typeof args[0] === "string" && args[0].includes("Non-JSON")
+    );
+  }
+
+  describe("non-JSON stdout logging", () => {
+    it("logs every non-JSON line at debug level", async () => {
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const bridge = createStdioBridge([makeBannerServer("debug-banner")], { logLevel: "debug" });
+      try {
+        await bridge.call("debug-banner", "test/ping", {});
+        await new Promise((r) => setTimeout(r, 100));
+        const logs = nonJsonLogs(spy);
+        expect(logs.length).toBeGreaterThanOrEqual(1);
+        expect(logs[0][0]).toContain("Starting up...");
+      } finally {
+        spy.mockRestore();
+        await bridge.shutdown();
+      }
+    }, 10000);
+
+    // Parametrized test: at info/warn/error, the one-shot warning MUST still fire
+    // (covers the original silent-failure regression and the level-ordering bug).
+    it.each(["info", "warn", "error"] as const)(
+      "emits one-shot warning at logLevel=%s (loud by default)",
+      async (logLevel) => {
+        const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+        const bridge = createStdioBridge([makeBannerServer(`${logLevel}-banner`)], { logLevel });
+        try {
+          await bridge.call(`${logLevel}-banner`, "test/ping", {});
+          await new Promise((r) => setTimeout(r, 100));
+          const logs = nonJsonLogs(spy);
+          // Exactly one warning per server, regardless of how many non-JSON lines come through
+          expect(logs.length).toBe(1);
+          expect(logs[0][0]).toContain(`${logLevel}-banner`);
+        } finally {
+          spy.mockRestore();
+          await bridge.shutdown();
+        }
+      },
+      10000
+    );
+
+    it("one-shot warning fires only once even with many non-JSON lines", async () => {
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const noisyServer: McpServerDef = {
+        name: "noisy",
+        command: "node",
+        args: [
+          "-e",
+          `
+          // Emit 3 non-JSON lines (under the fail-fast threshold of 5), then echo JSON
+          process.stdout.write("line 1\\n");
+          process.stdout.write("line 2\\n");
+          process.stdout.write("line 3\\n");
+          process.stdin.setEncoding("utf8");
+          let buf = "";
+          process.stdin.on("data", (chunk) => {
+            buf += chunk;
+            const lines = buf.split("\\n");
+            buf = lines.pop() || "";
+            for (const line of lines) {
+              if (!line.trim()) continue;
+              try {
+                const req = JSON.parse(line);
+                process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: req.id, result: { ok: true } }) + "\\n");
+              } catch {}
+            }
+          });
+          `,
+        ],
+      };
+      const bridge = createStdioBridge([noisyServer], { logLevel: "info" });
+      try {
+        await bridge.call("noisy", "test/ping", {});
+        await new Promise((r) => setTimeout(r, 100));
+        const logs = nonJsonLogs(spy);
+        expect(logs.length).toBe(1); // one-shot, not three
+      } finally {
+        spy.mockRestore();
+        await bridge.shutdown();
+      }
+    }, 10000);
+
+    it("fail-fast: rejects pending calls when spawn emits only non-JSON lines", async () => {
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const brokenServer: McpServerDef = {
+        name: "broken-spawn",
+        command: "node",
+        args: [
+          "-e",
+          `
+          // Pretend we're a misconfigured binary writing diagnostic text
+          for (let i = 1; i <= 6; i++) process.stdout.write("error line " + i + "\\n");
+          // Never read stdin or emit JSON-RPC
+          setInterval(() => {}, 60000);
+          `,
+        ],
+      };
+      const bridge = createStdioBridge([brokenServer], { logLevel: "info" });
+      try {
+        await expect(bridge.call("broken-spawn", "test/ping", {})).rejects.toThrow(
+          /misconfigured spawn|non-JSON lines/i
+        );
+      } finally {
+        spy.mockRestore();
+        await bridge.shutdown();
+      }
+    }, 10000);
+
+    it("fail-fast: subsequent calls to a broken server reject promptly without re-spawning", async () => {
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const brokenServer: McpServerDef = {
+        name: "broken-spawn-repeat",
+        command: "node",
+        args: [
+          "-e",
+          `
+          for (let i = 1; i <= 6; i++) process.stdout.write("error line " + i + "\\n");
+          setInterval(() => {}, 60000);
+          `,
+        ],
+      };
+      const bridge = createStdioBridge([brokenServer], { logLevel: "info" });
+      try {
+        // First call triggers fail-fast and marks the process as broken
+        await expect(bridge.call("broken-spawn-repeat", "ping", {})).rejects.toThrow(
+          /misconfigured spawn|non-JSON lines/i
+        );
+
+        // Second call must reject SYNCHRONOUSLY (no waiting for new non-JSON lines).
+        const startedAt = Date.now();
+        await expect(bridge.call("broken-spawn-repeat", "ping", {})).rejects.toThrow(
+          /misconfigured spawn|non-JSON lines/i
+        );
+        expect(Date.now() - startedAt).toBeLessThan(50);
+
+        // Third call: same fast rejection
+        const startedAt2 = Date.now();
+        await expect(bridge.call("broken-spawn-repeat", "ping", {})).rejects.toThrow(
+          /misconfigured spawn|non-JSON lines/i
+        );
+        expect(Date.now() - startedAt2).toBeLessThan(50);
+      } finally {
+        spy.mockRestore();
+        await bridge.shutdown();
+      }
+    }, 10000);
+
+    it("fail-fast can be disabled with failFastNonJsonLines=0", async () => {
+      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const slowStartServer: McpServerDef = {
+        name: "slow-start",
+        command: "node",
+        args: [
+          "-e",
+          `
+          for (let i = 1; i <= 10; i++) process.stdout.write("preamble " + i + "\\n");
+          process.stdin.setEncoding("utf8");
+          let buf = "";
+          process.stdin.on("data", (chunk) => {
+            buf += chunk;
+            const lines = buf.split("\\n");
+            buf = lines.pop() || "";
+            for (const line of lines) {
+              if (!line.trim()) continue;
+              try {
+                const req = JSON.parse(line);
+                process.stdout.write(JSON.stringify({ jsonrpc: "2.0", id: req.id, result: { ok: true } }) + "\\n");
+              } catch {}
+            }
+          });
+          `,
+        ],
+      };
+      const bridge = createStdioBridge([slowStartServer], {
+        logLevel: "info",
+        failFastNonJsonLines: 0,
+      });
+      try {
+        const result = await bridge.call("slow-start", "test/ping", {});
+        expect(result).toEqual({ ok: true });
+      } finally {
+        spy.mockRestore();
+        await bridge.shutdown();
+      }
     }, 10000);
   });
 });

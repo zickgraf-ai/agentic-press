@@ -8,3 +8,33 @@ export type SandboxId = Brand<string, "SandboxId">;
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
 export type AuditStatus = "allowed" | "blocked" | "flagged" | "error";
+
+const LOG_LEVEL_RANK: Record<LogLevel, number> = {
+  debug: 10,
+  info: 20,
+  warn: 30,
+  error: 40,
+};
+
+/** Validate and parse a string into a LogLevel, falling back to "info" with a warning. */
+export function parseLogLevel(value: string | undefined): LogLevel {
+  if (!value) return "info";
+  const normalized = value.toLowerCase();
+  // Use Object.hasOwn — the `in` operator walks the prototype chain, so
+  // values like "constructor", "toString", "hasOwnProperty" would otherwise
+  // be returned as if they were valid log levels.
+  if (Object.hasOwn(LOG_LEVEL_RANK, normalized)) return normalized as LogLevel;
+  console.error(`[parseLogLevel] Unknown LOG_LEVEL "${value}", falling back to "info"`);
+  return "info";
+}
+
+/**
+ * Returns true if a message at `threshold` severity would be emitted given the
+ * current minimum log level. Standard logger semantics:
+ *   levelAtLeast("info", "warn")  → true   (warns pass info filter)
+ *   levelAtLeast("warn", "info")  → false  (infos filtered by warn min)
+ *   levelAtLeast("info", "debug") → false  (debug filtered by info min)
+ */
+export function levelAtLeast(current: LogLevel, threshold: LogLevel): boolean {
+  return LOG_LEVEL_RANK[threshold] >= LOG_LEVEL_RANK[current];
+}
