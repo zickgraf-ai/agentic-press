@@ -1,6 +1,6 @@
 import { createProxyServer, type ProxyServerConfig } from "./mcp-proxy/server.js";
 import { createStdioBridge, type McpServerDef, type StdioBridge } from "./mcp-proxy/stdio-bridge.js";
-import type { LogLevel } from "./types.js";
+import { parseLogLevel } from "./types.js";
 
 // Parse MCP server definitions from env: JSON array of {name, command, args, env?}
 // Example: MCP_SERVERS='[{"name":"fs","command":"npx","args":["-y","@anthropic-ai/mcp-filesystem"]}]'
@@ -26,12 +26,13 @@ function parseServerRoutes(): Record<string, string> | undefined {
   }
 }
 
+const logLevel = parseLogLevel(process.env.LOG_LEVEL);
 const serverDefs = parseServerDefs();
 const serverRoutes = parseServerRoutes();
 let bridge: StdioBridge | undefined;
 
 if (serverDefs.length > 0) {
-  bridge = createStdioBridge(serverDefs);
+  bridge = createStdioBridge(serverDefs, { logLevel });
   console.log(`Stdio bridge created with ${serverDefs.length} server(s): ${serverDefs.map((s) => s.name).join(", ")}`);
 }
 
@@ -43,7 +44,7 @@ if (isNaN(port) || port < 1 || port > 65535) {
 const config: ProxyServerConfig = {
   port,
   allowedTools: (process.env.ALLOWED_TOOLS ?? "").split(",").filter(Boolean),
-  logLevel: (process.env.LOG_LEVEL ?? "info") as LogLevel,
+  logLevel,
   bridge,
   serverRoutes,
 };
