@@ -10,6 +10,8 @@ export interface McpServerDef {
 export interface StdioBridge {
   call(serverName: string, method: string, params: unknown): Promise<unknown>;
   shutdown(): Promise<void>;
+  /** Expose child process for testing. Returns null if not spawned. */
+  getProcess(serverName: string): ChildProcess | null;
 }
 
 interface PendingHandler {
@@ -155,11 +157,40 @@ export function createStdioBridge(servers: McpServerDef[]): StdioBridge {
     },
 
     async shutdown(): Promise<void> {
+      const exitPromises: Promise<void>[] = [];
       for (const [, managed] of processes) {
         rejectAllPending(managed, new Error("Bridge shutting down")); // clears timeouts (#H-3)
+
+        // If already exited, no need to wait
+        if (managed.proc.exitCode !== null) {
+          continue;
+        }
+
+        // Wait for exit event with a timeout to avoid hanging forever
+        const exitPromise = new Promise<void>((resolve) => {
+          const timer = setTimeout(() => {
+            // Force kill if graceful shutdown didn't work
+            managed.proc.kill("SIGKILL");
+            resolve();
+          }, 5000);
+
+          managed.proc.once("exit", () => {
+            clearTimeout(timer);
+            resolve();
+          });
+        });
+
         managed.proc.kill();
+        exitPromises.push(exitPromise);
       }
+
+      await Promise.all(exitPromises);
       processes.clear();
+    },
+
+    getProcess(serverName: string): ChildProcess | null {
+      const managed = processes.get(serverName);
+      return managed ? managed.proc : null;
     },
   };
 }

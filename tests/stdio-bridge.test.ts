@@ -80,4 +80,45 @@ describe("stdio bridge", () => {
       }
     }, 10000);
   });
+
+  describe("shutdown", () => {
+    it("awaits child process exit — proc.exitCode is set after shutdown resolves", async () => {
+      // Spawn a server that traps SIGTERM and delays exit by 200ms
+      const servers: McpServerDef[] = [
+        {
+          name: "slow-exit",
+          command: "node",
+          args: [
+            "-e",
+            `
+            process.on("SIGTERM", () => {
+              setTimeout(() => process.exit(0), 200);
+            });
+            setInterval(() => {}, 60000);
+            `,
+          ],
+        },
+      ];
+
+      const bridge = createStdioBridge(servers);
+
+      // Fire a call to force the process to spawn; don't await (it will never get a reply)
+      const callPromise = bridge.call("slow-exit", "ping", {}).catch(() => {});
+
+      // Wait for process to be running
+      await new Promise((r) => setTimeout(r, 100));
+
+      // Grab a reference to the child process before shutdown clears the map
+      const proc = bridge.getProcess("slow-exit");
+      expect(proc).toBeDefined();
+      expect(proc!.exitCode).toBeNull(); // still running
+
+      await bridge.shutdown();
+
+      // After shutdown resolves, the child MUST have exited
+      expect(proc!.exitCode).not.toBeNull();
+
+      await callPromise; // clean up pending promise
+    }, 10000);
+  });
 });
