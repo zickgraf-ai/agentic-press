@@ -74,7 +74,8 @@ function spawnServer(def: McpServerDef): ManagedProcess {
         try {
           msg = JSON.parse(line);
         } catch {
-          continue; // Skip non-JSON lines
+          console.error(`[stdio-bridge] Non-JSON line from "${def.name}": ${line.slice(0, 200)}`);
+          continue;
         }
 
         if (msg.id !== undefined && managed.pending.has(msg.id as number)) {

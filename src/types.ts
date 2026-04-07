@@ -7,4 +7,4 @@ export type TraceId = Brand<string, "TraceId">;
 export type SandboxId = Brand<string, "SandboxId">;
 
 export type LogLevel = "debug" | "info" | "warn" | "error";
-export type AuditStatus = "allowed" | "blocked" | "flagged";
+export type AuditStatus = "allowed" | "blocked" | "flagged" | "error";

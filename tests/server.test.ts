@@ -46,8 +46,9 @@ describe("MCP proxy server", () => {
   describe("GET /health", () => {
     beforeAll(async () => {
       const app = createProxyServer(makeConfig());
-      server = app.listen(TEST_PORT);
-      await new Promise((r) => setTimeout(r, 100));
+      await new Promise<void>((resolve) => {
+        server = app.listen(TEST_PORT, () => resolve());
+      });
     });
 
     it("returns 200 with status ok", async () => {
