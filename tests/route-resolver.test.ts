@@ -1,21 +1,26 @@
 import { describe, it, expect } from "vitest";
-import { resolveRoute } from "../src/mcp-proxy/server.js";
+import { resolveRoute, sortRoutes } from "../src/mcp-proxy/server.js";
+
+// Helper: sort routes then resolve (mirrors production usage)
+function resolve(toolName: string, routes: Record<string, string>): string | undefined {
+  return resolveRoute(toolName, sortRoutes(routes));
+}
 
 describe("resolveRoute", () => {
   it("returns undefined for empty routes", () => {
-    expect(resolveRoute("Read", {})).toBeUndefined();
+    expect(resolve("Read", {})).toBeUndefined();
   });
 
   it("matches exact route", () => {
-    expect(resolveRoute("Read", { Read: "fs" })).toBe("fs");
+    expect(resolve("Read", { Read: "fs" })).toBe("fs");
   });
 
   it("matches wildcard route", () => {
-    expect(resolveRoute("echo__read_file", { "echo__*": "echo" })).toBe("echo");
+    expect(resolve("echo__read_file", { "echo__*": "echo" })).toBe("echo");
   });
 
   it("returns undefined when nothing matches", () => {
-    expect(resolveRoute("unknown", { "echo__*": "echo" })).toBeUndefined();
+    expect(resolve("unknown", { "echo__*": "echo" })).toBeUndefined();
   });
 
   it("exact match wins over wildcard (H-4 specificity)", () => {
@@ -24,7 +29,7 @@ describe("resolveRoute", () => {
       "echo__*": "echo",
       "echo__read_file": "echo-reader",
     };
-    expect(resolveRoute("echo__read_file", routes)).toBe("echo-reader");
+    expect(resolve("echo__read_file", routes)).toBe("echo-reader");
   });
 
   it("longer wildcard prefix wins over shorter (H-4)", () => {
@@ -32,7 +37,7 @@ describe("resolveRoute", () => {
       "*": "default",
       "echo__*": "echo",
     };
-    expect(resolveRoute("echo__read", routes)).toBe("echo");
+    expect(resolve("echo__read", routes)).toBe("echo");
   });
 
   it("catch-all '*' is last resort", () => {
@@ -40,8 +45,8 @@ describe("resolveRoute", () => {
       "*": "default",
       "fs__*": "filesystem",
     };
-    expect(resolveRoute("fs__read", routes)).toBe("filesystem");
-    expect(resolveRoute("unknown_tool", routes)).toBe("default");
+    expect(resolve("fs__read", routes)).toBe("filesystem");
+    expect(resolve("unknown_tool", routes)).toBe("default");
   });
 
   it("multiple wildcards resolve to most specific", () => {
@@ -49,7 +54,22 @@ describe("resolveRoute", () => {
       "echo__read_*": "echo-reader",
       "echo__*": "echo-general",
     };
-    expect(resolveRoute("echo__read_file", routes)).toBe("echo-reader");
-    expect(resolveRoute("echo__write_file", routes)).toBe("echo-general");
+    expect(resolve("echo__read_file", routes)).toBe("echo-reader");
+    expect(resolve("echo__write_file", routes)).toBe("echo-general");
+  });
+});
+
+describe("sortRoutes", () => {
+  it("puts exact matches before wildcards", () => {
+    const sorted = sortRoutes({ "*": "a", "Read": "b" });
+    expect(sorted[0][0]).toBe("Read");
+    expect(sorted[1][0]).toBe("*");
+  });
+
+  it("puts longer wildcards before shorter", () => {
+    const sorted = sortRoutes({ "e__*": "short", "echo__read_*": "long", "echo__*": "mid" });
+    expect(sorted[0][0]).toBe("echo__read_*");
+    expect(sorted[1][0]).toBe("echo__*");
+    expect(sorted[2][0]).toBe("e__*");
   });
 });

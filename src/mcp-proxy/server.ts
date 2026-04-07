@@ -67,16 +67,19 @@ function collectStrings(value: unknown): string[] {
   return [];
 }
 
-// Match a tool name against route patterns using the same wildcard logic as the allowlist.
-// Routes are sorted by specificity: exact matches first, then longest prefix first.
-export function resolveRoute(toolName: string, routes: Record<string, string>): string | undefined {
-  const sorted = Object.entries(routes).sort(([a], [b]) => {
+// Sort route entries by specificity: exact matches first, then longest prefix first.
+export function sortRoutes(routes: Record<string, string>): [string, string][] {
+  return Object.entries(routes).sort(([a], [b]) => {
     const aWild = a.endsWith("*");
     const bWild = b.endsWith("*");
     if (aWild !== bWild) return aWild ? 1 : -1; // Exact matches first
     return b.length - a.length; // Longer patterns first
   });
-  for (const [pattern, serverName] of sorted) {
+}
+
+// Match a tool name against pre-sorted route patterns using the same wildcard logic as the allowlist.
+export function resolveRoute(toolName: string, sortedRoutes: [string, string][]): string | undefined {
+  for (const [pattern, serverName] of sortedRoutes) {
     if (matchesPattern(toolName, pattern)) return serverName;
   }
   return undefined;
@@ -88,7 +91,8 @@ export function createProxyServer(config: ProxyServerConfig): Express {
 
   const allowlistConfig: AllowlistConfig = { patterns: [...config.allowedTools] };
   const workspaceRoot = config.workspaceRoot ?? process.env.WORKSPACE_ROOT ?? process.cwd();
-  const { bridge, serverRoutes } = config;
+  const { bridge } = config;
+  const sortedRoutes = config.serverRoutes ? sortRoutes(config.serverRoutes) : undefined;
 
   app.get("/health", (_req: Request, res: Response) => {
     res.json({ status: "ok", port: config.port });
@@ -150,13 +154,13 @@ export function createProxyServer(config: ProxyServerConfig): Express {
       }
 
       // 4. Forward to MCP server via bridge
-      if (!bridge || !serverRoutes) {
+      if (!bridge || !sortedRoutes) {
         audit(toolName, toolArgs, "allowed");
         res.json(jsonRpcError(requestId, -32603, `No MCP backend configured for tool "${toolName}"`));
         return;
       }
 
-      const serverName = resolveRoute(toolName, serverRoutes);
+      const serverName = resolveRoute(toolName, sortedRoutes);
       if (!serverName) {
         audit(toolName, toolArgs, "blocked");
         res.json(jsonRpcError(requestId, -32600, `No route configured for tool "${toolName}"`));

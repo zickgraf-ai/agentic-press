@@ -154,8 +154,10 @@ echo "$POLICY_OUTPUT"
 # Capture all policy IDs for cleanup
 POLICY_IDS=$(echo "$POLICY_OUTPUT" | grep -oE '[0-9a-f-]{36}' || true)
 if [[ -z "$POLICY_IDS" ]]; then
-  echo "WARNING: Could not extract network policy IDs. Manual cleanup may be needed."
-  echo "sbx output: $POLICY_OUTPUT"
+  echo "WARNING: Could not extract network policy IDs. Manual cleanup may be needed:"
+  echo "  sbx policy ls          # list active policies"
+  echo "  sbx policy rm network --resource host.docker.internal:${PROXY_PORT}"
+  echo "sbx output was: $POLICY_OUTPUT"
 fi
 echo "Sandbox created and network policy set"
 echo ""
@@ -201,9 +203,12 @@ echo ""
 
 # 5. Verify audit log
 echo "=== Step 5: Verify audit log ==="
-sleep 1  # Let log flush
-
-AUDIT_LINES=$(grep -c '"tool"' "$AUDIT_LOG" || echo "0")
+# Wait for audit log to have at least 4 entries (up to 5s)
+for i in $(seq 1 10); do
+  AUDIT_LINES=$(grep -c '"tool"' "$AUDIT_LOG" 2>/dev/null || echo "0")
+  if [[ "$AUDIT_LINES" -ge 4 ]]; then break; fi
+  sleep 0.5
+done
 echo "Audit log entries: $AUDIT_LINES"
 if [[ "$AUDIT_LINES" -ge 4 ]]; then
   echo "  PASS: Audit log has expected entries"

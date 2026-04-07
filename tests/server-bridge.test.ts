@@ -2,45 +2,19 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { createProxyServer, type ProxyServerConfig } from "../src/mcp-proxy/server.js";
 import { createStdioBridge, type McpServerDef, type StdioBridge } from "../src/mcp-proxy/stdio-bridge.js";
 import type { Server } from "node:http";
+import { resolve, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 
 const TEST_PORT = 19998;
 
-// Minimal JSON-RPC echo server for stdio bridge
-const ECHO_SERVER_SCRIPT = `
-process.stdin.setEncoding("utf8");
-let buf = "";
-process.stdin.on("data", (chunk) => {
-  buf += chunk;
-  const lines = buf.split("\\n");
-  buf = lines.pop() || "";
-  for (const line of lines) {
-    if (!line.trim()) continue;
-    let req;
-    try { req = JSON.parse(line); } catch (e) {
-      process.stderr.write("echo-test-server: invalid JSON: " + e.message + "\\n");
-      continue;
-    }
-    if (req.method === "tools/call") {
-      const res = {
-        jsonrpc: "2.0",
-        id: req.id,
-        result: {
-          content: [{ type: "text", text: "echo: " + JSON.stringify(req.params) }],
-        },
-      };
-      process.stdout.write(JSON.stringify(res) + "\\n");
-    } else {
-      const res = { jsonrpc: "2.0", id: req.id, result: { method: req.method } };
-      process.stdout.write(JSON.stringify(res) + "\\n");
-    }
-  }
-});
-`;
+// Reuse the shared echo MCP server script (single source of truth)
+const __dirname = dirname(fileURLToPath(import.meta.url));
+const ECHO_SERVER_PATH = resolve(__dirname, "../scripts/echo-mcp-server.js");
 
 const echoServerDef: McpServerDef = {
   name: "echo",
   command: "node",
-  args: ["-e", ECHO_SERVER_SCRIPT],
+  args: [ECHO_SERVER_PATH],
 };
 
 function makeConfig(bridge: StdioBridge, overrides: Partial<ProxyServerConfig> = {}): ProxyServerConfig {
@@ -76,8 +50,9 @@ describe("MCP proxy server with bridge", () => {
   beforeAll(async () => {
     bridge = createStdioBridge([echoServerDef]);
     const app = createProxyServer(makeConfig(bridge));
-    server = app.listen(TEST_PORT);
-    await new Promise((r) => setTimeout(r, 100));
+    await new Promise<void>((resolve) => {
+      server = app.listen(TEST_PORT, () => resolve());
+    });
   });
 
   afterAll(async () => {
