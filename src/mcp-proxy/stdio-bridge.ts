@@ -7,11 +7,23 @@ export interface McpServerDef {
   env?: Record<string, string>;
 }
 
+/** Subset of ChildProcess fields exposed for test introspection. */
+export interface ProcessInfo {
+  readonly pid: number | undefined;
+  readonly exitCode: number | null;
+  readonly signalCode: NodeJS.Signals | null;
+}
+
+export interface StdioBridgeOptions {
+  /** Milliseconds to wait for graceful exit before SIGKILL. Default: 5000. */
+  readonly shutdownGracePeriodMs?: number;
+}
+
 export interface StdioBridge {
   call(serverName: string, method: string, params: unknown): Promise<unknown>;
   shutdown(): Promise<void>;
-  /** Expose child process for testing. Returns null if not spawned. */
-  getProcess(serverName: string): ChildProcess | null;
+  /** @internal Test-only introspection of a managed child process. */
+  getProcessInfo(serverName: string): ProcessInfo | null;
 }
 
 interface PendingHandler {
@@ -106,7 +118,8 @@ function spawnServer(def: McpServerDef): ManagedProcess {
   return managed;
 }
 
-export function createStdioBridge(servers: McpServerDef[]): StdioBridge {
+export function createStdioBridge(servers: McpServerDef[], options: StdioBridgeOptions = {}): StdioBridge {
+  const gracePeriodMs = options.shutdownGracePeriodMs ?? 5000;
   const processes = new Map<string, ManagedProcess>();
   const definitions = new Map<string, McpServerDef>();
 
@@ -160,37 +173,79 @@ export function createStdioBridge(servers: McpServerDef[]): StdioBridge {
       const exitPromises: Promise<void>[] = [];
       for (const [, managed] of processes) {
         rejectAllPending(managed, new Error("Bridge shutting down")); // clears timeouts (#H-3)
-
-        // If already exited, no need to wait
-        if (managed.proc.exitCode !== null) {
-          continue;
-        }
-
-        // Wait for exit event with a timeout to avoid hanging forever
-        const exitPromise = new Promise<void>((resolve) => {
-          const timer = setTimeout(() => {
-            // Force kill if graceful shutdown didn't work
-            managed.proc.kill("SIGKILL");
-            resolve();
-          }, 5000);
-
-          managed.proc.once("exit", () => {
-            clearTimeout(timer);
-            resolve();
-          });
-        });
-
-        managed.proc.kill();
-        exitPromises.push(exitPromise);
+        exitPromises.push(shutdownOne(managed, gracePeriodMs));
       }
 
-      await Promise.all(exitPromises);
-      processes.clear();
+      try {
+        // allSettled — one server's failure must not abort the others
+        await Promise.allSettled(exitPromises);
+      } finally {
+        processes.clear();
+      }
     },
 
-    getProcess(serverName: string): ChildProcess | null {
+    getProcessInfo(serverName: string): ProcessInfo | null {
       const managed = processes.get(serverName);
-      return managed ? managed.proc : null;
+      if (!managed) return null;
+      return {
+        pid: managed.proc.pid,
+        exitCode: managed.proc.exitCode,
+        signalCode: managed.proc.signalCode,
+      };
     },
   };
+}
+
+/** Gracefully terminate one managed process. Awaits exit event for both SIGTERM and SIGKILL phases. */
+async function shutdownOne(managed: ManagedProcess, gracePeriodMs: number): Promise<void> {
+  const proc = managed.proc;
+  const name = managed.def.name;
+
+  // Already exited — nothing to do
+  if (proc.exitCode !== null || proc.signalCode !== null) return;
+
+  // Wait for exit event (resolves promise once child is fully reaped)
+  const exited = new Promise<void>((resolve) => {
+    proc.once("exit", () => resolve());
+    // Race recheck (#C-2): if exit fired between the early-return check above and
+    // this listener attachment, the listener will never fire — check synchronously here.
+    if (proc.exitCode !== null || proc.signalCode !== null) resolve();
+  });
+
+  // Send SIGTERM (default kill signal). Tolerate ESRCH/EPERM — child may have died.
+  try {
+    proc.kill();
+  } catch (err) {
+    console.error(`[stdio-bridge] SIGTERM to "${name}" failed:`, err);
+  }
+
+  // Race graceful exit against the grace period
+  let graceTimer: ReturnType<typeof setTimeout> | undefined;
+  const graceExpired = new Promise<"timeout">((resolve) => {
+    graceTimer = setTimeout(() => resolve("timeout"), gracePeriodMs);
+  });
+
+  const result = await Promise.race([exited.then(() => "exited" as const), graceExpired]);
+  if (graceTimer) clearTimeout(graceTimer);
+
+  if (result === "exited") return;
+
+  // Grace period exceeded — escalate to SIGKILL and wait for actual exit
+  console.error(`[stdio-bridge] Server "${name}" did not exit within ${gracePeriodMs}ms, sending SIGKILL`);
+  try {
+    proc.kill("SIGKILL");
+  } catch (err) {
+    console.error(`[stdio-bridge] SIGKILL to "${name}" failed:`, err);
+  }
+
+  // SIGKILL is async — wait for the actual exit event before returning (#C-1)
+  // Use a hard ceiling to prevent hanging forever if the kernel can't reap the child.
+  const HARD_CEILING_MS = 2000;
+  const hardTimer = new Promise<"hard-timeout">((resolve) =>
+    setTimeout(() => resolve("hard-timeout"), HARD_CEILING_MS)
+  );
+  const final = await Promise.race([exited.then(() => "exited" as const), hardTimer]);
+  if (final === "hard-timeout") {
+    console.error(`[stdio-bridge] Server "${name}" still alive ${HARD_CEILING_MS}ms after SIGKILL — leaking`);
+  }
 }

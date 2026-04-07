@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { createStdioBridge, type McpServerDef } from "../src/mcp-proxy/stdio-bridge.js";
 
 describe("stdio bridge", () => {
@@ -82,43 +82,138 @@ describe("stdio bridge", () => {
   });
 
   describe("shutdown", () => {
-    it("awaits child process exit — proc.exitCode is set after shutdown resolves", async () => {
-      // Spawn a server that traps SIGTERM and delays exit by 200ms
+    // Server that traps SIGTERM and delays exit by 200ms (graceful shutdown path)
+    const slowGracefulServer: McpServerDef = {
+      name: "slow-graceful",
+      command: "node",
+      args: [
+        "-e",
+        `
+        process.on("SIGTERM", () => {
+          setTimeout(() => process.exit(0), 200);
+        });
+        setInterval(() => {}, 60000);
+        `,
+      ],
+    };
+
+    // Server that ignores SIGTERM completely — only SIGKILL will stop it
+    const sigtermIgnoreServer: McpServerDef = {
+      name: "sigterm-ignore",
+      command: "node",
+      args: [
+        "-e",
+        `
+        process.on("SIGTERM", () => {}); // swallow SIGTERM
+        setInterval(() => {}, 60000);
+        `,
+      ],
+    };
+
+    async function spawnAndGetProcessInfo(bridge: ReturnType<typeof createStdioBridge>, name: string) {
+      // Force spawn by issuing a no-reply call
+      bridge.call(name, "ping", {}).catch(() => {});
+      // Wait for spawn to settle
+      await new Promise((r) => setTimeout(r, 100));
+      const info = bridge.getProcessInfo(name);
+      expect(info).not.toBeNull();
+      return info!;
+    }
+
+    it("awaits child exit — exitCode is non-null after shutdown resolves (graceful path)", async () => {
+      const bridge = createStdioBridge([slowGracefulServer]);
+      const beforeInfo = await spawnAndGetProcessInfo(bridge, "slow-graceful");
+      expect(beforeInfo.exitCode).toBeNull(); // running
+      expect(beforeInfo.pid).toBeDefined();
+
+      const startedAt = Date.now();
+      await bridge.shutdown();
+      const elapsed = Date.now() - startedAt;
+
+      // Bug-reproduction proof (S-4): shutdown must have actually waited ≥ ~190ms,
+      // not coincidentally observed an exited process.
+      expect(elapsed).toBeGreaterThanOrEqual(180);
+    }, 10000);
+
+    it("escalates to SIGKILL when child ignores SIGTERM (I-1: SIGKILL fallback)", async () => {
+      // Short grace period (50ms) so this test runs in milliseconds, not seconds (S-2)
+      const bridge = createStdioBridge([sigtermIgnoreServer], { shutdownGracePeriodMs: 50 });
+      const info = await spawnAndGetProcessInfo(bridge, "sigterm-ignore");
+      expect(info.exitCode).toBeNull();
+
+      const startedAt = Date.now();
+      await bridge.shutdown();
+      const elapsed = Date.now() - startedAt;
+
+      // Must have exceeded the grace period (proving SIGKILL was reached)
+      expect(elapsed).toBeGreaterThanOrEqual(50);
+      // But must not have exceeded grace + hard ceiling (2000ms) by much
+      expect(elapsed).toBeLessThan(2500);
+    }, 10000);
+
+    it("shuts down multiple servers concurrently (I-2)", async () => {
+      // Three slow-graceful servers — must run in parallel, total time ~ max(delays), not sum.
       const servers: McpServerDef[] = [
-        {
-          name: "slow-exit",
-          command: "node",
-          args: [
-            "-e",
-            `
-            process.on("SIGTERM", () => {
-              setTimeout(() => process.exit(0), 200);
-            });
-            setInterval(() => {}, 60000);
-            `,
-          ],
-        },
+        { ...slowGracefulServer, name: "slow-1" },
+        { ...slowGracefulServer, name: "slow-2" },
+        { ...slowGracefulServer, name: "slow-3" },
       ];
 
       const bridge = createStdioBridge(servers);
+      await spawnAndGetProcessInfo(bridge, "slow-1");
+      await spawnAndGetProcessInfo(bridge, "slow-2");
+      await spawnAndGetProcessInfo(bridge, "slow-3");
 
-      // Fire a call to force the process to spawn; don't await (it will never get a reply)
-      const callPromise = bridge.call("slow-exit", "ping", {}).catch(() => {});
+      const startedAt = Date.now();
+      await bridge.shutdown();
+      const elapsed = Date.now() - startedAt;
 
-      // Wait for process to be running
+      // Three 200ms delays in parallel ≈ 200-400ms; serialized would be ≥600ms.
+      expect(elapsed).toBeGreaterThanOrEqual(180);
+      expect(elapsed).toBeLessThan(600);
+    }, 10000);
+
+    it("handles already-exited process without waiting (I-5)", async () => {
+      // Server that exits immediately
+      const fastExitServer: McpServerDef = {
+        name: "fast-exit",
+        command: "node",
+        args: ["-e", "process.exit(0)"],
+      };
+
+      const bridge = createStdioBridge([fastExitServer]);
+      // Force spawn
+      bridge.call("fast-exit", "ping", {}).catch(() => {});
+      // Wait long enough for child to exit on its own
+      await new Promise((r) => setTimeout(r, 200));
+
+      const info = bridge.getProcessInfo("fast-exit");
+      expect(info).not.toBeNull();
+      expect(info!.exitCode).not.toBeNull(); // already dead
+
+      const startedAt = Date.now();
+      await bridge.shutdown();
+      const elapsed = Date.now() - startedAt;
+      // Should be near-instant (no grace period wait)
+      expect(elapsed).toBeLessThan(50);
+    }, 10000);
+
+    it("getProcessInfo returns null for unknown server", () => {
+      const bridge = createStdioBridge([]);
+      expect(bridge.getProcessInfo("nonexistent")).toBeNull();
+    });
+
+    it("rejectAllPending — pending calls reject with 'Bridge shutting down' on shutdown (S-5)", async () => {
+      const bridge = createStdioBridge([slowGracefulServer], { shutdownGracePeriodMs: 100 });
+      // Issue a call that will never get a response
+      const callPromise = bridge.call("slow-graceful", "ping", {});
+      // Wait for spawn
       await new Promise((r) => setTimeout(r, 100));
 
-      // Grab a reference to the child process before shutdown clears the map
-      const proc = bridge.getProcess("slow-exit");
-      expect(proc).toBeDefined();
-      expect(proc!.exitCode).toBeNull(); // still running
-
-      await bridge.shutdown();
-
-      // After shutdown resolves, the child MUST have exited
-      expect(proc!.exitCode).not.toBeNull();
-
-      await callPromise; // clean up pending promise
+      // Shutdown should reject the pending call
+      const shutdownPromise = bridge.shutdown();
+      await expect(callPromise).rejects.toThrow(/shutting down/i);
+      await shutdownPromise;
     }, 10000);
   });
 });
