@@ -1,4 +1,4 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { loadLangfuseConfig } from "../../src/observability/config.js";
 
 describe("loadLangfuseConfig", () => {
@@ -33,6 +33,31 @@ describe("loadLangfuseConfig", () => {
       expect(cfg.secretKey).toBe("sk-test");
       expect(cfg.host).toBe("https://cloud.langfuse.com");
     }
+  });
+
+  it("warns and returns disabled when only LANGFUSE_PUBLIC_KEY is set (#C4)", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const cfg = loadLangfuseConfig({ LANGFUSE_PUBLIC_KEY: "pk-test" });
+    expect(cfg.enabled).toBe(false);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0]![0]).toContain("only one credential is set");
+    warnSpy.mockRestore();
+  });
+
+  it("warns and returns disabled when only LANGFUSE_SECRET_KEY is set (#C4)", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const cfg = loadLangfuseConfig({ LANGFUSE_SECRET_KEY: "sk-test" });
+    expect(cfg.enabled).toBe(false);
+    expect(warnSpy).toHaveBeenCalledTimes(1);
+    expect(warnSpy.mock.calls[0]![0]).toContain("only one credential is set");
+    warnSpy.mockRestore();
+  });
+
+  it("does not warn when both keys are missing", () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    loadLangfuseConfig({});
+    expect(warnSpy).not.toHaveBeenCalled();
+    warnSpy.mockRestore();
   });
 
   it("honors a custom LANGFUSE_HOST", () => {

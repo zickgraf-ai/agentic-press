@@ -16,7 +16,7 @@ const LangfuseCtor = vi.fn(function (this: any) {
 const langfuseModuleFactory = vi.fn(() => ({ Langfuse: LangfuseCtor }));
 vi.mock("langfuse", () => langfuseModuleFactory());
 
-import { createTracer } from "../../src/observability/langfuse.js";
+import { createTracer, getNoopActiveTrace } from "../../src/observability/langfuse.js";
 
 beforeEach(() => {
   traceSpan.mockReset();
@@ -38,14 +38,15 @@ describe("createTracer (no-op mode)", () => {
     expect(langfuseModuleFactory).not.toHaveBeenCalled();
   });
 
-  it("no-op tracer methods do not throw and return sentinel handles", async () => {
+  it("no-op tracer returns the singleton sentinel ActiveTrace and never throws", async () => {
     const tracer = await createTracer({ enabled: false });
-    const handle = tracer.startTrace({ name: "test" });
-    expect(handle).toBeDefined();
-    expect(() =>
-      tracer.spanToolCall(handle, { tool: "Read", status: "allowed", durationMs: 5 })
-    ).not.toThrow();
-    expect(() => tracer.endTrace(handle, { outcome: "ok" })).not.toThrow();
+    const active = tracer.startTrace({ name: "test" });
+    expect(active).toBe(getNoopActiveTrace());
+    // Two successive startTrace calls must return the same cached sentinel —
+    // the disabled path must not allocate per request.
+    expect(tracer.startTrace({ name: "test2" })).toBe(active);
+    expect(() => active.span({ tool: "Read", status: "allowed", durationMs: 5 })).not.toThrow();
+    expect(() => active.end({ outcome: "allowed" })).not.toThrow();
     await expect(tracer.flush()).resolves.toBeUndefined();
     await expect(tracer.shutdown()).resolves.toBeUndefined();
     expect(LangfuseCtor).not.toHaveBeenCalled();
@@ -70,30 +71,32 @@ describe("createTracer (enabled mode)", () => {
     );
   });
 
-  it("startTrace calls SDK trace() once and returns a non-noop handle", async () => {
+  it("startTrace calls SDK trace() once and returns an ActiveTrace", async () => {
     const tracer = await createTracer({
       enabled: true,
       publicKey: "pk",
       secretKey: "sk",
       host: "https://cloud.langfuse.com",
     });
-    const handle = tracer.startTrace({ name: "mcp.request:Read", sessionId: "s1", metadata: { foo: 1 } });
+    const active = tracer.startTrace({ name: "mcp.request:Read", sessionId: "s1", metadata: { foo: 1 } });
     expect(langfuseTrace).toHaveBeenCalledTimes(1);
     expect(langfuseTrace).toHaveBeenCalledWith(
       expect.objectContaining({ name: "mcp.request:Read", sessionId: "s1" })
     );
-    expect(handle).toBeDefined();
+    expect(active).toBeDefined();
+    expect(typeof active.span).toBe("function");
+    expect(typeof active.end).toBe("function");
   });
 
-  it("spanToolCall calls trace.span with mcp.tool_call and metadata", async () => {
+  it("ActiveTrace.span calls trace.span with mcp.tool_call and metadata", async () => {
     const tracer = await createTracer({
       enabled: true,
       publicKey: "pk",
       secretKey: "sk",
       host: "https://cloud.langfuse.com",
     });
-    const handle = tracer.startTrace({ name: "mcp.request:Read" });
-    tracer.spanToolCall(handle, {
+    const active = tracer.startTrace({ name: "mcp.request:Read" });
+    active.span({
       tool: "Read",
       status: "allowed",
       durationMs: 12,
@@ -110,21 +113,38 @@ describe("createTracer (enabled mode)", () => {
     });
   });
 
-  it("endTrace updates the trace with outcome metadata", async () => {
+  it("ActiveTrace.end updates the trace with outcome metadata", async () => {
     const tracer = await createTracer({
       enabled: true,
       publicKey: "pk",
       secretKey: "sk",
       host: "https://cloud.langfuse.com",
     });
-    const handle = tracer.startTrace({ name: "mcp.request:Read" });
-    tracer.endTrace(handle, { outcome: "allowed" });
+    const active = tracer.startTrace({ name: "mcp.request:Read" });
+    active.end({ outcome: "allowed" });
     expect(traceUpdate).toHaveBeenCalledTimes(1);
     const arg = traceUpdate.mock.calls[0]![0];
     expect(arg.metadata).toEqual({ outcome: "allowed" });
   });
 
-  it("swallows SDK errors thrown inside spanToolCall", async () => {
+  it("ActiveTrace.end is idempotent — second call is a no-op at the SDK level", async () => {
+    const tracer = await createTracer({
+      enabled: true,
+      publicKey: "pk",
+      secretKey: "sk",
+      host: "https://cloud.langfuse.com",
+    });
+    const active = tracer.startTrace({ name: "mcp.request:Read" });
+    active.end({ outcome: "allowed" });
+    active.end({ outcome: "error" });
+    active.end({ outcome: "blocked" });
+    expect(traceUpdate).toHaveBeenCalledTimes(1);
+    // And span() after end() is also a no-op — the session is closed.
+    active.span({ tool: "Read", status: "allowed", durationMs: 1 });
+    expect(traceSpan).not.toHaveBeenCalled();
+  });
+
+  it("swallows SDK errors thrown inside ActiveTrace.span", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     traceSpan.mockImplementationOnce(() => {
       throw new Error("boom");
@@ -135,15 +155,15 @@ describe("createTracer (enabled mode)", () => {
       secretKey: "sk",
       host: "https://cloud.langfuse.com",
     });
-    const handle = tracer.startTrace({ name: "mcp.request:Read" });
+    const active = tracer.startTrace({ name: "mcp.request:Read" });
     expect(() =>
-      tracer.spanToolCall(handle, { tool: "Read", status: "allowed", durationMs: 1 })
+      active.span({ tool: "Read", status: "allowed", durationMs: 1 })
     ).not.toThrow();
     expect(warnSpy).toHaveBeenCalled();
     warnSpy.mockRestore();
   });
 
-  it("swallows SDK errors thrown inside endTrace", async () => {
+  it("swallows SDK errors thrown inside ActiveTrace.end", async () => {
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     traceUpdate.mockImplementationOnce(() => {
       throw new Error("boom");
@@ -154,8 +174,25 @@ describe("createTracer (enabled mode)", () => {
       secretKey: "sk",
       host: "https://cloud.langfuse.com",
     });
-    const handle = tracer.startTrace({ name: "mcp.request:Read" });
-    expect(() => tracer.endTrace(handle, { outcome: "ok" })).not.toThrow();
+    const active = tracer.startTrace({ name: "mcp.request:Read" });
+    expect(() => active.end({ outcome: "allowed" })).not.toThrow();
+    expect(warnSpy).toHaveBeenCalled();
+    warnSpy.mockRestore();
+  });
+
+  it("startTrace SDK failure returns the no-op sentinel", async () => {
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    langfuseTrace.mockImplementationOnce(() => {
+      throw new Error("trace boom");
+    });
+    const tracer = await createTracer({
+      enabled: true,
+      publicKey: "pk",
+      secretKey: "sk",
+      host: "https://cloud.langfuse.com",
+    });
+    const active = tracer.startTrace({ name: "mcp.request:Read" });
+    expect(active).toBe(getNoopActiveTrace());
     expect(warnSpy).toHaveBeenCalled();
     warnSpy.mockRestore();
   });

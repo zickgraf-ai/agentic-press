@@ -2,7 +2,7 @@ import { createProxyServer, type ProxyServerConfig } from "./mcp-proxy/server.js
 import { createStdioBridge, type McpServerDef, type StdioBridge } from "./mcp-proxy/stdio-bridge.js";
 import { parseLogLevel } from "./types.js";
 import { loadLangfuseConfig } from "./observability/config.js";
-import { createTracer, type Tracer } from "./observability/langfuse.js";
+import { createTracer, createNoopTracer, type Tracer } from "./observability/langfuse.js";
 
 // Parse MCP server definitions from env: JSON array of {name, command, args, env?}
 // Example: MCP_SERVERS='[{"name":"fs","command":"npx","args":["-y","@anthropic-ai/mcp-filesystem"]}]'
@@ -46,10 +46,21 @@ if (isNaN(port) || port < 1 || port > 65535) {
 // Build the tracer up-front. createTracer is async because the langfuse SDK
 // is loaded via dynamic import on the enabled path; the no-op path resolves
 // synchronously so this top-level await is effectively free when disabled.
+//
+// Startup must never fail because of observability: if createTracer throws
+// (e.g. the langfuse SDK fails to load), fall back to the no-op tracer and
+// keep the proxy serving. This is consistent with the "observability must
+// never break the request path" invariant.
 const langfuseConfig = loadLangfuseConfig(process.env);
-const tracer: Tracer = await createTracer(langfuseConfig);
-if (langfuseConfig.enabled) {
-  console.log(`Langfuse tracing enabled (host: ${langfuseConfig.host})`);
+let tracer: Tracer;
+try {
+  tracer = await createTracer(langfuseConfig);
+  if (langfuseConfig.enabled) {
+    console.log(`Langfuse tracing enabled (host: ${langfuseConfig.host})`);
+  }
+} catch (err) {
+  console.warn("[langfuse] createTracer failed at startup — falling back to no-op tracer:", err);
+  tracer = createNoopTracer();
 }
 
 const config: ProxyServerConfig = {
@@ -83,15 +94,29 @@ function shutdown(signal: string) {
   forceTimer.unref(); // Don't keep process alive just for the timer
 
   server.close(() => {
+    // Race the tracer shutdown against a 3s timeout so a slow Langfuse flush
+    // can never turn a clean SIGTERM into exit(1). Use allSettled so one
+    // shutdown rejecting doesn't poison the other's exit status.
+    const tracerShutdown = Promise.race([
+      tracer.shutdown(),
+      new Promise<void>((resolve) =>
+        setTimeout(() => {
+          console.warn("[shutdown] tracer.shutdown() timed out after 3s — proceeding");
+          resolve();
+        }, 3000).unref()
+      ),
+    ]);
     const tasks: Promise<unknown>[] = [];
     if (bridge) tasks.push(bridge.shutdown());
-    tasks.push(tracer.shutdown());
-    Promise.all(tasks)
-      .then(() => process.exit(0))
-      .catch((err) => {
-        console.error("Shutdown failed:", err);
-        process.exit(1);
-      });
+    tasks.push(tracerShutdown);
+    Promise.allSettled(tasks).then((results) => {
+      for (const r of results) {
+        if (r.status === "rejected") {
+          console.error("Shutdown task failed:", r.reason);
+        }
+      }
+      process.exit(0);
+    });
   });
 }
 

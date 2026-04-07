@@ -30,6 +30,17 @@ export function loadLangfuseConfig(
 ): LangfuseConfig {
   const publicKey = env.LANGFUSE_PUBLIC_KEY;
   const secretKey = env.LANGFUSE_SECRET_KEY;
+  // Warn loudly on half-configured credentials — a typo in one of the env var
+  // names would otherwise silently disable tracing and make the misconfig very
+  // hard to notice in prod.
+  const hasPublic = Boolean(publicKey);
+  const hasSecret = Boolean(secretKey);
+  if (hasPublic !== hasSecret) {
+    console.warn(
+      "[langfuse] only one credential is set (LANGFUSE_PUBLIC_KEY or LANGFUSE_SECRET_KEY) — tracing disabled"
+    );
+    return { enabled: false };
+  }
   if (!publicKey || !secretKey) {
     return { enabled: false };
   }
