@@ -298,6 +298,11 @@ export function createProxyServer(config: ProxyServerConfig): Express {
     } catch (err) {
       const rawMessage = err instanceof Error ? err.message : String(err);
       console.error(`[${correlationId}] MCP proxy error:`, rawMessage); // (#N-4)
+      try {
+        audit(toolName ?? "<unknown>", {}, "error", [], rawMessage);
+      } catch (auditErr) {
+        console.error(`[${correlationId}] Audit logging failed:`, auditErr);
+      }
       // Best-effort: close any in-flight trace so we never leak an open trace
       // across requests. end() is idempotent so double-ends are harmless.
       safeSpan({ tool: toolName ?? "<unknown>", status: "error", durationMs: Date.now() - start });
