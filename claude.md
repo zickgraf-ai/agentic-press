@@ -52,11 +52,20 @@ npm run dev          # Start MCP proxy (tsx)
 
 - **TDD required**: write failing tests first → implement → refactor
 - **GitHub issues first**: create issue before starting work
-- **Worktree isolation**: use `git worktree` for feature branches
+- **Fresh sandbox per issue (dogfooding)**: every new piece of work starts with a brand-new sbx sandbox bound to a brand-new git worktree on a new branch. Never reuse a pre-existing sandbox (like `dev`) for new feature work — that defeats the parallel-issue isolation the project depends on. Pattern:
+  ```
+  sbx create --name ap-<short-slug> --branch <type>/<issue>-<desc> shell .
+  sbx exec ap-<short-slug> bash -c 'cd /workspace && npm install'
+  ```
+  Reason: host `node_modules` are darwin-arm64 and unusable in the linux-arm64 container, and parallel issues touching shared files require independent worktrees to rebase cleanly.
+- **Run inside the sandbox, edit on the host**: file edits happen on the host (the worktree is bind-mounted, so changes appear instantly inside the container). Execution — `npm test`, `npm run build`, `npm run typecheck`, `./scripts/sandbox-run.sh` — always goes through `sbx exec`. Never run these on the host.
+- **Commits and `gh pr` from the host main session**: sub-agents inside sandboxes cannot run `git commit/push`. Stage and commit from the host against the same worktree.
+- **Cleanup after merge**: `sbx rm <name>`, then check `git worktree list` and delete any stale `pr-NN` branches `gh pr checkout` left behind.
+- **Worktree isolation**: use `git worktree` for feature branches (the `sbx create --branch` flow above creates one automatically)
 - **Branch naming**: `<type>/<issue-number>-<description>` (e.g., `feat/7-mcp-proxy-server`)
 - **Code review before merge**: every PR reviewed via pr-review-toolkit, address findings, merge after approval
 - **Security changes**: enter Plan Mode first for any changes to `src/security/` or `src/mcp-proxy/`
-- **Workflow**: issue → branch → tests → implement → PR → review → fix → merge
+- **Workflow**: issue → fresh sandbox + worktree + branch → npm install in sandbox → tests → implement → PR → review → fix → merge → sandbox cleanup
 
 ## Learnings
 
