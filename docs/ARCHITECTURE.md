@@ -53,6 +53,25 @@ Docker Sandbox (sbx)                 Host Machine
 - Proxy layer: tool allowlisting → request/response sanitization → workspace path restriction → audit logging
 - Agents CANNOT access MCP servers directly — all access is mediated
 
+## Structured Logging
+
+All diagnostic output uses [pino](https://github.com/pinojs/pino) for structured JSON logging. Each module creates a scoped child logger via `childLogger("module-name")` from `src/logger.ts`, which attaches a `module` field to every log entry.
+
+**Log streams:**
+- **Diagnostic logs** (pino): structured JSON to stdout — level, timestamp, module, and context fields (e.g. `correlationId`, `server`)
+- **Audit logs** (`src/mcp-proxy/logger.ts`): structured NDJSON to stdout — tool call records with status, flags, duration
+
+**Key design decisions:**
+- `LOG_LEVEL` env var wired into pino's level config via `parseLogLevel()` in `src/types.ts`
+- Per-request child loggers in the MCP proxy bind `correlationId` as a structured field (not a string prefix)
+- Observability errors (Langfuse, metrics) are logged but never thrown — the request path is never broken
+- Audit entries maintain their own JSON schema and are not routed through pino
+
+**Development:** pipe through `pino-pretty` for human-readable output:
+```bash
+npm run dev | npx pino-pretty
+```
+
 ## Observability Architecture (Phase 1.5)
 
 ### Langfuse Cloud — LLM/Agent Tracing

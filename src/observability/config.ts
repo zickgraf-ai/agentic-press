@@ -16,6 +16,9 @@ export interface ObservabilityConfig {
   readonly metrics: MetricsConfig;
 }
 
+import { childLogger } from "../logger.js";
+
+const log = childLogger("langfuse");
 const DEFAULT_LANGFUSE_HOST = "https://cloud.langfuse.com";
 
 /**
@@ -36,9 +39,7 @@ export function loadLangfuseConfig(
   const hasPublic = Boolean(publicKey);
   const hasSecret = Boolean(secretKey);
   if (hasPublic !== hasSecret) {
-    console.warn(
-      "[langfuse] only one credential is set (LANGFUSE_PUBLIC_KEY or LANGFUSE_SECRET_KEY) — tracing disabled"
-    );
+    log.warn("only one credential is set (LANGFUSE_PUBLIC_KEY or LANGFUSE_SECRET_KEY) — tracing disabled");
     return { enabled: false };
   }
   if (!publicKey || !secretKey) {

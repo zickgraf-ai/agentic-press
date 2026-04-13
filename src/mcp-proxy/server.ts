@@ -1,6 +1,7 @@
 import express, { type Express, type Request, type Response, type NextFunction } from "express";
 import { randomBytes } from "node:crypto";
 import type { LogLevel } from "../types.js";
+import { childLogger } from "../logger.js";
 import { checkAllowlist, matchesPattern, type AllowlistConfig } from "./allowlist.js";
 import { checkPath } from "../security/path-guard.js";
 import { sanitize } from "./sanitizer.js";
@@ -13,6 +14,8 @@ import {
   type SpanToolCallParams,
   type EndTraceParams,
 } from "../observability/langfuse.js";
+
+const log = childLogger("mcp-proxy");
 
 export interface ProxyServerConfig {
   readonly port: number;
@@ -123,6 +126,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
     const start = Date.now();
     // Short, log-correlation-friendly id. Regenerated per request.
     const correlationId = randomBytes(8).toString("hex");
+    const reqLog = log.child({ correlationId });
     let requestId: number | string | null = null; // Hoisted for catch block (#N-3)
     let toolName: string | undefined; // Hoisted so outer catch can emit a span (#C2)
     let activeTrace: ActiveTrace | undefined;
@@ -138,7 +142,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
       try {
         activeTrace.span(params);
       } catch (err) {
-        console.warn(`[${correlationId}] tracer.span threw (ignored):`, err);
+        reqLog.warn({ err }, "tracer.span threw (ignored)");
       }
     }
     function safeEnd(params: EndTraceParams) {
@@ -146,7 +150,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
       try {
         activeTrace.end(params);
       } catch (err) {
-        console.warn(`[${correlationId}] tracer.end threw (ignored):`, err);
+        reqLog.warn({ err }, "tracer.end threw (ignored)");
       }
     }
 
@@ -204,7 +208,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
           metadata: { method, requestId, correlationId },
         });
       } catch (err) {
-        console.warn("[tracer] startTrace failed:", err);
+        reqLog.warn({ err }, "startTrace failed");
         activeTrace = undefined;
       }
 
@@ -281,14 +285,11 @@ export function createProxyServer(config: ProxyServerConfig): Express {
         .catch((err) => {
           if (res.headersSent) return;
           const rawMessage = err instanceof Error ? err.message : String(err);
-          console.error(
-            `[${correlationId}] Bridge call to "${serverName}" failed:`,
-            rawMessage
-          );
+          reqLog.error({ server: serverName, error: rawMessage }, "Bridge call failed");
           try {
             audit(tool, toolArgs, "error", [], rawMessage);
           } catch (auditErr) {
-            console.error(`[${correlationId}] Audit logging failed:`, auditErr);
+            reqLog.error({ err: auditErr }, "Audit logging failed");
           }
           safeSpan({ tool, status: "error", durationMs: Date.now() - start });
           safeEnd({ outcome: "error" });
@@ -297,11 +298,11 @@ export function createProxyServer(config: ProxyServerConfig): Express {
       return; // Response handled in promise callbacks
     } catch (err) {
       const rawMessage = err instanceof Error ? err.message : String(err);
-      console.error(`[${correlationId}] MCP proxy error:`, rawMessage); // (#N-4)
+      reqLog.error({ error: rawMessage }, "MCP proxy error");
       try {
         audit(toolName ?? "<unknown>", {}, "error", [], rawMessage);
       } catch (auditErr) {
-        console.error(`[${correlationId}] Audit logging failed:`, auditErr);
+        reqLog.error({ err: auditErr }, "Audit logging failed");
       }
       // Best-effort: close any in-flight trace so we never leak an open trace
       // across requests. end() is idempotent so double-ends are harmless.
@@ -315,7 +316,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
   // runs outside the per-request handler's closure.
   app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
     const correlationId = randomBytes(8).toString("hex");
-    console.error(`[${correlationId}] MCP proxy unhandled error:`, err.message); // (#N-4)
+    log.error({ correlationId, error: err.message }, "MCP proxy unhandled error");
     res.status(500).json(jsonRpcError(null, -32603, genericInternalError(correlationId)));
   });
 

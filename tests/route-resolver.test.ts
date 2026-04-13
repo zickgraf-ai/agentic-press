@@ -1,4 +1,11 @@
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
+
+vi.mock("../src/logger.js", () => {
+  const m = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(), child: vi.fn() };
+  m.child.mockReturnValue(m);
+  return { default: m, childLogger: vi.fn(() => m) };
+});
+
 import { resolveRoute, sortRoutes } from "../src/mcp-proxy/server.js";
 
 // Helper: sort routes then resolve (mirrors production usage)

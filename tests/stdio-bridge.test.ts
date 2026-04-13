@@ -1,4 +1,22 @@
 import { describe, it, expect, vi } from "vitest";
+
+const { mockLogger } = vi.hoisted(() => {
+  const mockLogger = {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+    child: vi.fn(),
+  };
+  mockLogger.child.mockReturnValue(mockLogger);
+  return { mockLogger };
+});
+
+vi.mock("../src/logger.js", () => ({
+  default: mockLogger,
+  childLogger: vi.fn(() => mockLogger),
+}));
+
 import { createStdioBridge, type McpServerDef } from "../src/mcp-proxy/stdio-bridge.js";
 
 describe("stdio bridge", () => {
@@ -248,25 +266,33 @@ describe("stdio bridge", () => {
     };
   }
 
-  /** Returns console.error calls that mention the bridge's "Non-JSON" diagnostic. */
-  function nonJsonLogs(spy: ReturnType<typeof vi.spyOn>): unknown[][] {
-    return spy.mock.calls.filter(
-      (args) => typeof args[0] === "string" && args[0].includes("Non-JSON")
+  /** Returns logger calls that mention the bridge's "Non-JSON" diagnostic. */
+  function nonJsonLogs(): unknown[][] {
+    // After structured logger migration: debug-level logs go to mockLogger.debug,
+    // one-shot warnings go to mockLogger.warn. Check both.
+    const debugCalls = mockLogger.debug.mock.calls.filter(
+      (args: unknown[]) => typeof args[1] === "string" && args[1].includes("Non-JSON")
     );
+    const warnCalls = mockLogger.warn.mock.calls.filter(
+      (args: unknown[]) => typeof args[1] === "string" && args[1].includes("Non-JSON")
+    );
+    return [...debugCalls, ...warnCalls];
   }
 
   describe("non-JSON stdout logging", () => {
     it("logs every non-JSON line at debug level", async () => {
-      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+      mockLogger.debug.mockClear();
+      mockLogger.warn.mockClear();
       const bridge = createStdioBridge([makeBannerServer("debug-banner")], { logLevel: "debug" });
       try {
         await bridge.call("debug-banner", "test/ping", {});
         await new Promise((r) => setTimeout(r, 100));
-        const logs = nonJsonLogs(spy);
-        expect(logs.length).toBeGreaterThanOrEqual(1);
-        expect(logs[0][0]).toContain("Starting up...");
+        const debugCalls = mockLogger.debug.mock.calls.filter(
+          (args: unknown[]) => typeof args[1] === "string" && args[1].includes("Non-JSON")
+        );
+        expect(debugCalls.length).toBeGreaterThanOrEqual(1);
+        expect(debugCalls[0][1]).toContain("Starting up...");
       } finally {
-        spy.mockRestore();
         await bridge.shutdown();
       }
     }, 10000);
@@ -276,17 +302,19 @@ describe("stdio bridge", () => {
     it.each(["info", "warn", "error"] as const)(
       "emits one-shot warning at logLevel=%s (loud by default)",
       async (logLevel) => {
-        const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+        mockLogger.warn.mockClear();
+        mockLogger.debug.mockClear();
         const bridge = createStdioBridge([makeBannerServer(`${logLevel}-banner`)], { logLevel });
         try {
           await bridge.call(`${logLevel}-banner`, "test/ping", {});
           await new Promise((r) => setTimeout(r, 100));
-          const logs = nonJsonLogs(spy);
+          const warnCalls = mockLogger.warn.mock.calls.filter(
+            (args: unknown[]) => typeof args[1] === "string" && args[1].includes("Non-JSON")
+          );
           // Exactly one warning per server, regardless of how many non-JSON lines come through
-          expect(logs.length).toBe(1);
-          expect(logs[0][0]).toContain(`${logLevel}-banner`);
+          expect(warnCalls.length).toBe(1);
+          expect((warnCalls[0][0] as Record<string, unknown>).server).toBe(`${logLevel}-banner`);
         } finally {
-          spy.mockRestore();
           await bridge.shutdown();
         }
       },
@@ -294,7 +322,7 @@ describe("stdio bridge", () => {
     );
 
     it("one-shot warning fires only once even with many non-JSON lines", async () => {
-      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+      mockLogger.warn.mockClear();
       const noisyServer: McpServerDef = {
         name: "noisy",
         command: "node",
@@ -326,16 +354,14 @@ describe("stdio bridge", () => {
       try {
         await bridge.call("noisy", "test/ping", {});
         await new Promise((r) => setTimeout(r, 100));
-        const logs = nonJsonLogs(spy);
+        const logs = nonJsonLogs();
         expect(logs.length).toBe(1); // one-shot, not three
       } finally {
-        spy.mockRestore();
         await bridge.shutdown();
       }
     }, 10000);
 
     it("fail-fast: rejects pending calls when spawn emits only non-JSON lines", async () => {
-      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
       const brokenServer: McpServerDef = {
         name: "broken-spawn",
         command: "node",
@@ -355,13 +381,11 @@ describe("stdio bridge", () => {
           /misconfigured spawn|non-JSON lines/i
         );
       } finally {
-        spy.mockRestore();
         await bridge.shutdown();
       }
     }, 10000);
 
     it("fail-fast: subsequent calls to a broken server reject promptly without re-spawning", async () => {
-      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
       const brokenServer: McpServerDef = {
         name: "broken-spawn-repeat",
         command: "node",
@@ -394,13 +418,11 @@ describe("stdio bridge", () => {
         );
         expect(Date.now() - startedAt2).toBeLessThan(50);
       } finally {
-        spy.mockRestore();
         await bridge.shutdown();
       }
     }, 10000);
 
     it("fail-fast can be disabled with failFastNonJsonLines=0", async () => {
-      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
       const slowStartServer: McpServerDef = {
         name: "slow-start",
         command: "node",
@@ -433,7 +455,6 @@ describe("stdio bridge", () => {
         const result = await bridge.call("slow-start", "test/ping", {});
         expect(result).toEqual({ ok: true });
       } finally {
-        spy.mockRestore();
         await bridge.shutdown();
       }
     }, 10000);

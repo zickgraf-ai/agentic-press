@@ -24,7 +24,6 @@ export function parseLogLevel(value: string | undefined): LogLevel {
   // values like "constructor", "toString", "hasOwnProperty" would otherwise
   // be returned as if they were valid log levels.
   if (Object.hasOwn(LOG_LEVEL_RANK, normalized)) return normalized as LogLevel;
-  console.error(`[parseLogLevel] Unknown LOG_LEVEL "${value}", falling back to "info"`);
   return "info";
 }
 

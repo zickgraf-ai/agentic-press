@@ -1,5 +1,8 @@
 import type { AuditStatus } from "../types.js";
 import type { LangfuseConfig } from "./config.js";
+import { childLogger } from "../logger.js";
+
+const log = childLogger("langfuse");
 // Type-only import: elided at runtime so it does not pull the `langfuse`
 // module in when tracing is disabled. `langfuse` lives in optionalDependencies,
 // but TypeScript resolves type-only imports against whatever is present in
@@ -95,7 +98,7 @@ export function getNoopActiveTrace(): ActiveTrace {
  * the request hot-path without introducing per-request promise overhead.
  *
  * All SDK calls inside span/end are wrapped in try/catch and failures are
- * logged via console.warn — observability MUST NEVER break the request path.
+ * logged via the structured logger — observability MUST NEVER break the request path.
  * This is intentional and tested.
  */
 export async function createTracer(config: LangfuseConfig): Promise<Tracer> {
@@ -128,7 +131,7 @@ export async function createTracer(config: LangfuseConfig): Promise<Tracer> {
           metadata: params.metadata,
         });
       } catch (err) {
-        console.warn("[langfuse] startTrace failed:", err);
+        log.warn({ err }, "startTrace failed");
         // Return the no-op sentinel so the caller doesn't need to distinguish
         // "tracing disabled" from "tracing failed to start this request".
         return NOOP_ACTIVE_TRACE;
@@ -153,7 +156,7 @@ export async function createTracer(config: LangfuseConfig): Promise<Tracer> {
               },
             });
           } catch (err) {
-            console.warn("[langfuse] span failed:", err);
+            log.warn({ err }, "span failed");
           }
         },
         end(endParams: EndTraceParams) {
@@ -166,7 +169,7 @@ export async function createTracer(config: LangfuseConfig): Promise<Tracer> {
               metadata: { outcome: endParams.outcome, ...(endParams.metadata ?? {}) },
             });
           } catch (err) {
-            console.warn("[langfuse] end failed:", err);
+            log.warn({ err }, "end failed");
           }
         },
       } as unknown as ActiveTrace;
@@ -176,14 +179,14 @@ export async function createTracer(config: LangfuseConfig): Promise<Tracer> {
       try {
         await client.flushAsync();
       } catch (err) {
-        console.warn("[langfuse] flush failed:", err);
+        log.warn({ err }, "flush failed");
       }
     },
     async shutdown() {
       try {
         await client.shutdownAsync();
       } catch (err) {
-        console.warn("[langfuse] shutdown failed:", err);
+        log.warn({ err }, "shutdown failed");
       }
     },
   };

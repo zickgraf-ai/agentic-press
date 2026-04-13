@@ -1,5 +1,22 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
 
+const { mockLogger } = vi.hoisted(() => {
+  const mockLogger = {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+    child: vi.fn(),
+  };
+  mockLogger.child.mockReturnValue(mockLogger);
+  return { mockLogger };
+});
+
+vi.mock("../../src/logger.js", () => ({
+  default: mockLogger,
+  childLogger: vi.fn(() => mockLogger),
+}));
+
 // Mocked Langfuse SDK — we capture spies so each test can assert against them.
 const traceSpan = vi.fn();
 const traceUpdate = vi.fn();
@@ -145,7 +162,7 @@ describe("createTracer (enabled mode)", () => {
   });
 
   it("swallows SDK errors thrown inside ActiveTrace.span", async () => {
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mockLogger.warn.mockClear();
     traceSpan.mockImplementationOnce(() => {
       throw new Error("boom");
     });
@@ -159,12 +176,11 @@ describe("createTracer (enabled mode)", () => {
     expect(() =>
       active.span({ tool: "Read", status: "allowed", durationMs: 1 })
     ).not.toThrow();
-    expect(warnSpy).toHaveBeenCalled();
-    warnSpy.mockRestore();
+    expect(mockLogger.warn).toHaveBeenCalled();
   });
 
   it("swallows SDK errors thrown inside ActiveTrace.end", async () => {
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mockLogger.warn.mockClear();
     traceUpdate.mockImplementationOnce(() => {
       throw new Error("boom");
     });
@@ -176,12 +192,11 @@ describe("createTracer (enabled mode)", () => {
     });
     const active = tracer.startTrace({ name: "mcp.request:Read" });
     expect(() => active.end({ outcome: "allowed" })).not.toThrow();
-    expect(warnSpy).toHaveBeenCalled();
-    warnSpy.mockRestore();
+    expect(mockLogger.warn).toHaveBeenCalled();
   });
 
   it("startTrace SDK failure returns the no-op sentinel", async () => {
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mockLogger.warn.mockClear();
     langfuseTrace.mockImplementationOnce(() => {
       throw new Error("trace boom");
     });
@@ -193,8 +208,7 @@ describe("createTracer (enabled mode)", () => {
     });
     const active = tracer.startTrace({ name: "mcp.request:Read" });
     expect(active).toBe(getNoopActiveTrace());
-    expect(warnSpy).toHaveBeenCalled();
-    warnSpy.mockRestore();
+    expect(mockLogger.warn).toHaveBeenCalled();
   });
 
   it("flush and shutdown delegate to SDK", async () => {
