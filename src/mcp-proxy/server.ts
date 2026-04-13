@@ -126,6 +126,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
     const start = Date.now();
     // Short, log-correlation-friendly id. Regenerated per request.
     const correlationId = randomBytes(8).toString("hex");
+    res.locals.correlationId = correlationId;
     const reqLog = log.child({ correlationId });
     let requestId: number | string | null = null; // Hoisted for catch block (#N-3)
     let toolName: string | undefined; // Hoisted so outer catch can emit a span (#C2)
@@ -312,10 +313,12 @@ export function createProxyServer(config: ProxyServerConfig): Express {
     }
   });
 
-  // Global error handler (#H-5). Emits a new correlation id because this path
-  // runs outside the per-request handler's closure.
+  // Global error handler (#H-5). Reuses the per-request correlationId from
+  // res.locals so the client-facing ref matches the server-side log entry.
+  // Falls back to a fresh id only if the error fires before the request
+  // handler stored one (e.g. middleware-level failure).
   app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
-    const correlationId = randomBytes(8).toString("hex");
+    const correlationId = (res.locals.correlationId as string) ?? randomBytes(8).toString("hex");
     log.error({ correlationId, error: err.message }, "MCP proxy unhandled error");
     res.status(500).json(jsonRpcError(null, -32603, genericInternalError(correlationId)));
   });

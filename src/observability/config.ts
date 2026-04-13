@@ -1,3 +1,5 @@
+import { childLogger } from "../logger.js";
+
 export type LangfuseConfig =
   | { readonly enabled: false }
   | {
@@ -15,8 +17,6 @@ export interface ObservabilityConfig {
   readonly langfuse: LangfuseConfig;
   readonly metrics: MetricsConfig;
 }
-
-import { childLogger } from "../logger.js";
 
 const log = childLogger("langfuse");
 const DEFAULT_LANGFUSE_HOST = "https://cloud.langfuse.com";

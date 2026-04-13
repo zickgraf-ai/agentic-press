@@ -1,10 +1,15 @@
 import { describe, it, expect, vi } from "vitest";
 
-vi.mock("../src/logger.js", () => {
-  const m = { info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(), child: vi.fn() };
-  m.child.mockReturnValue(m);
-  return { default: m, childLogger: vi.fn(() => m) };
+const { mockLogger } = vi.hoisted(() => {
+  const mockLogger = {
+    info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(), child: vi.fn(),
+  };
+  mockLogger.child.mockReturnValue(mockLogger);
+  return { mockLogger };
 });
+vi.mock("../src/logger.js", () => ({
+  default: mockLogger, childLogger: vi.fn(() => mockLogger),
+}));
 
 import { resolveRoute, sortRoutes } from "../src/mcp-proxy/server.js";
 
