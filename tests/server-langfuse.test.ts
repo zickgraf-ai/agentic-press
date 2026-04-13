@@ -1,6 +1,24 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
 import type { AddressInfo } from "node:net";
 import type { Server } from "node:http";
+
+const { mockLogger } = vi.hoisted(() => {
+  const mockLogger = {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+    child: vi.fn(),
+  };
+  mockLogger.child.mockReturnValue(mockLogger);
+  return { mockLogger };
+});
+
+vi.mock("../src/logger.js", () => ({
+  default: mockLogger,
+  childLogger: vi.fn(() => mockLogger),
+}));
+
 import { createProxyServer, type ProxyServerConfig } from "../src/mcp-proxy/server.js";
 import type { Tracer, ActiveTrace } from "../src/observability/langfuse.js";
 import type { StdioBridge } from "../src/mcp-proxy/stdio-bridge.js";
@@ -236,25 +254,20 @@ describe("MCP proxy tracing — bridge error path", () => {
   });
 
   it("records error status when bridge call fails, returns a generic error, and still ends the trace", async () => {
-    const errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-    try {
-      const res = await mcpCall(url, 99, "Read", { path: "./package.json" });
-      expect(res.status).toBe(200);
-      const body = await res.json();
-      expect(body.error).toBeDefined();
-      // Info-leak fix: the raw "bridge boom" must NOT appear in the client
-      // response. The generic message includes a correlation id so operators
-      // can grep server logs.
-      expect(body.error.message).not.toContain("bridge boom");
-      expect(body.error.message).toMatch(/^Internal proxy error \(ref: [0-9a-f]{16}\)$/);
-      expect(tracer.span).toHaveBeenCalled();
-      const last = tracer.span.mock.calls.at(-1)!;
-      expect(last[0].status).toBe("error");
-      expect(tracer.end).toHaveBeenCalled();
-      expect(tracer.end.mock.calls.at(-1)![0].outcome).toBe("error");
-    } finally {
-      errSpy.mockRestore();
-    }
+    const res = await mcpCall(url, 99, "Read", { path: "./package.json" });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.error).toBeDefined();
+    // Info-leak fix: the raw "bridge boom" must NOT appear in the client
+    // response. The generic message includes a correlation id so operators
+    // can grep server logs.
+    expect(body.error.message).not.toContain("bridge boom");
+    expect(body.error.message).toMatch(/^Internal proxy error \(ref: [0-9a-f]{16}\)$/);
+    expect(tracer.span).toHaveBeenCalled();
+    const last = tracer.span.mock.calls.at(-1)!;
+    expect(last[0].status).toBe("error");
+    expect(tracer.end).toHaveBeenCalled();
+    expect(tracer.end.mock.calls.at(-1)![0].outcome).toBe("error");
   });
 });
 
@@ -267,18 +280,6 @@ describe("MCP proxy tracing — bridge error path", () => {
 // -----------------------------------------------------------------------------
 
 describe("MCP proxy tracer error isolation (#C5)", () => {
-  let warnSpy: ReturnType<typeof vi.spyOn>;
-  let errSpy: ReturnType<typeof vi.spyOn>;
-
-  beforeEach(() => {
-    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-  });
-
-  afterEach(() => {
-    warnSpy.mockRestore();
-    errSpy.mockRestore();
-  });
 
   /**
    * Build a tracer whose startTrace returns an ActiveTrace with (optionally)
@@ -371,18 +372,6 @@ describe("MCP proxy tracer error isolation (#C5)", () => {
 // -----------------------------------------------------------------------------
 
 describe("MCP proxy outer-catch trace cleanup (#I6)", () => {
-  let warnSpy: ReturnType<typeof vi.spyOn>;
-  let errSpy: ReturnType<typeof vi.spyOn>;
-
-  beforeEach(() => {
-    warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
-    errSpy = vi.spyOn(console, "error").mockImplementation(() => {});
-  });
-
-  afterEach(() => {
-    warnSpy.mockRestore();
-    errSpy.mockRestore();
-  });
 
   it("calls end exactly once with outcome=error when the pipeline throws after startTrace, and returns a generic error", async () => {
     const tracer = makeSpyTracer();

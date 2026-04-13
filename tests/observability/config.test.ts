@@ -1,4 +1,22 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect, vi, beforeEach } from "vitest";
+
+const { mockLogger } = vi.hoisted(() => {
+  const mockLogger = {
+    info: vi.fn(),
+    warn: vi.fn(),
+    error: vi.fn(),
+    debug: vi.fn(),
+    child: vi.fn(),
+  };
+  mockLogger.child.mockReturnValue(mockLogger);
+  return { mockLogger };
+});
+
+vi.mock("../../src/logger.js", () => ({
+  default: mockLogger,
+  childLogger: vi.fn(() => mockLogger),
+}));
+
 import { loadLangfuseConfig } from "../../src/observability/config.js";
 
 describe("loadLangfuseConfig", () => {
@@ -36,28 +54,25 @@ describe("loadLangfuseConfig", () => {
   });
 
   it("warns and returns disabled when only LANGFUSE_PUBLIC_KEY is set (#C4)", () => {
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mockLogger.warn.mockClear();
     const cfg = loadLangfuseConfig({ LANGFUSE_PUBLIC_KEY: "pk-test" });
     expect(cfg.enabled).toBe(false);
-    expect(warnSpy).toHaveBeenCalledTimes(1);
-    expect(warnSpy.mock.calls[0]![0]).toContain("only one credential is set");
-    warnSpy.mockRestore();
+    expect(mockLogger.warn).toHaveBeenCalledTimes(1);
+    expect(mockLogger.warn.mock.calls[0]![0]).toContain("only one credential is set");
   });
 
   it("warns and returns disabled when only LANGFUSE_SECRET_KEY is set (#C4)", () => {
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mockLogger.warn.mockClear();
     const cfg = loadLangfuseConfig({ LANGFUSE_SECRET_KEY: "sk-test" });
     expect(cfg.enabled).toBe(false);
-    expect(warnSpy).toHaveBeenCalledTimes(1);
-    expect(warnSpy.mock.calls[0]![0]).toContain("only one credential is set");
-    warnSpy.mockRestore();
+    expect(mockLogger.warn).toHaveBeenCalledTimes(1);
+    expect(mockLogger.warn.mock.calls[0]![0]).toContain("only one credential is set");
   });
 
   it("does not warn when both keys are missing", () => {
-    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    mockLogger.warn.mockClear();
     loadLangfuseConfig({});
-    expect(warnSpy).not.toHaveBeenCalled();
-    warnSpy.mockRestore();
+    expect(mockLogger.warn).not.toHaveBeenCalled();
   });
 
   it("honors a custom LANGFUSE_HOST", () => {
