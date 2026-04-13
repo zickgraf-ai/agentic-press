@@ -97,14 +97,15 @@ function handleNonJsonLine(
   const truncated = line.slice(0, 200);
 
   if (levelAtLeast(logLevel, "debug")) {
-    log.debug({ server: name }, `Non-JSON line: ${truncated}`);
+    log.debug({ server: name, nonJsonLine: truncated }, "Non-JSON line from server");
   } else if (!managed.warnedAboutNonJson) {
     // One-shot per-server warning — always emitted regardless of log level.
     // A protocol violation on the transport channel is never something an
-    // operator wants silently dropped.
-    log.warn(
-      { server: name },
-      `Non-JSON output detected on stdout (set LOG_LEVEL=debug for all lines): ${truncated}`
+    // operator wants silently dropped. Uses error level so it is never
+    // filtered, even at LOG_LEVEL=error.
+    log.error(
+      { server: name, nonJsonLine: truncated },
+      "Non-JSON output detected on stdout (set LOG_LEVEL=debug for all lines)"
     );
     managed.warnedAboutNonJson = true;
   }

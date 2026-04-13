@@ -2,19 +2,13 @@ import { describe, it, expect, vi } from "vitest";
 
 const { mockLogger } = vi.hoisted(() => {
   const mockLogger = {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-    child: vi.fn(),
+    info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(), child: vi.fn(),
   };
   mockLogger.child.mockReturnValue(mockLogger);
   return { mockLogger };
 });
-
 vi.mock("../src/logger.js", () => ({
-  default: mockLogger,
-  childLogger: vi.fn(() => mockLogger),
+  default: mockLogger, childLogger: vi.fn(() => mockLogger),
 }));
 
 import { createStdioBridge, type McpServerDef } from "../src/mcp-proxy/stdio-bridge.js";
@@ -269,20 +263,20 @@ describe("stdio bridge", () => {
   /** Returns logger calls that mention the bridge's "Non-JSON" diagnostic. */
   function nonJsonLogs(): unknown[][] {
     // After structured logger migration: debug-level logs go to mockLogger.debug,
-    // one-shot warnings go to mockLogger.warn. Check both.
+    // one-shot protocol-violation warnings go to mockLogger.error (never filtered).
     const debugCalls = mockLogger.debug.mock.calls.filter(
       (args: unknown[]) => typeof args[1] === "string" && args[1].includes("Non-JSON")
     );
-    const warnCalls = mockLogger.warn.mock.calls.filter(
+    const errorCalls = mockLogger.error.mock.calls.filter(
       (args: unknown[]) => typeof args[1] === "string" && args[1].includes("Non-JSON")
     );
-    return [...debugCalls, ...warnCalls];
+    return [...debugCalls, ...errorCalls];
   }
 
   describe("non-JSON stdout logging", () => {
     it("logs every non-JSON line at debug level", async () => {
       mockLogger.debug.mockClear();
-      mockLogger.warn.mockClear();
+      mockLogger.error.mockClear();
       const bridge = createStdioBridge([makeBannerServer("debug-banner")], { logLevel: "debug" });
       try {
         await bridge.call("debug-banner", "test/ping", {});
@@ -291,7 +285,8 @@ describe("stdio bridge", () => {
           (args: unknown[]) => typeof args[1] === "string" && args[1].includes("Non-JSON")
         );
         expect(debugCalls.length).toBeGreaterThanOrEqual(1);
-        expect(debugCalls[0][1]).toContain("Starting up...");
+        // The banner text is in the structured nonJsonLine field, not the message
+        expect((debugCalls[0][0] as Record<string, unknown>).nonJsonLine).toContain("Starting up...");
       } finally {
         await bridge.shutdown();
       }
@@ -302,18 +297,18 @@ describe("stdio bridge", () => {
     it.each(["info", "warn", "error"] as const)(
       "emits one-shot warning at logLevel=%s (loud by default)",
       async (logLevel) => {
-        mockLogger.warn.mockClear();
+        mockLogger.error.mockClear();
         mockLogger.debug.mockClear();
         const bridge = createStdioBridge([makeBannerServer(`${logLevel}-banner`)], { logLevel });
         try {
           await bridge.call(`${logLevel}-banner`, "test/ping", {});
           await new Promise((r) => setTimeout(r, 100));
-          const warnCalls = mockLogger.warn.mock.calls.filter(
+          const errorCalls = mockLogger.error.mock.calls.filter(
             (args: unknown[]) => typeof args[1] === "string" && args[1].includes("Non-JSON")
           );
           // Exactly one warning per server, regardless of how many non-JSON lines come through
-          expect(warnCalls.length).toBe(1);
-          expect((warnCalls[0][0] as Record<string, unknown>).server).toBe(`${logLevel}-banner`);
+          expect(errorCalls.length).toBe(1);
+          expect((errorCalls[0][0] as Record<string, unknown>).server).toBe(`${logLevel}-banner`);
         } finally {
           await bridge.shutdown();
         }
@@ -322,7 +317,7 @@ describe("stdio bridge", () => {
     );
 
     it("one-shot warning fires only once even with many non-JSON lines", async () => {
-      mockLogger.warn.mockClear();
+      mockLogger.error.mockClear();
       const noisyServer: McpServerDef = {
         name: "noisy",
         command: "node",

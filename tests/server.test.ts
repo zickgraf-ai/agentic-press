@@ -2,19 +2,13 @@ import { describe, it, expect, beforeAll, afterAll, vi } from "vitest";
 
 const { mockLogger } = vi.hoisted(() => {
   const mockLogger = {
-    info: vi.fn(),
-    warn: vi.fn(),
-    error: vi.fn(),
-    debug: vi.fn(),
-    child: vi.fn(),
+    info: vi.fn(), warn: vi.fn(), error: vi.fn(), debug: vi.fn(), child: vi.fn(),
   };
   mockLogger.child.mockReturnValue(mockLogger);
   return { mockLogger };
 });
-
 vi.mock("../src/logger.js", () => ({
-  default: mockLogger,
-  childLogger: vi.fn(() => mockLogger),
+  default: mockLogger, childLogger: vi.fn(() => mockLogger),
 }));
 
 import { createProxyServer, type ProxyServerConfig } from "../src/mcp-proxy/server.js";

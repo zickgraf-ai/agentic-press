@@ -38,7 +38,7 @@ let bridge: StdioBridge | undefined;
 
 if (serverDefs.length > 0) {
   bridge = createStdioBridge(serverDefs, { logLevel });
-  log.info(`Stdio bridge created with ${serverDefs.length} server(s): ${serverDefs.map((s) => s.name).join(", ")}`);
+  log.info({ serverCount: serverDefs.length, servers: serverDefs.map((s) => s.name) }, "Stdio bridge created");
 }
 
 const port = parseInt(process.env.MCP_PROXY_PORT ?? "18923", 10);

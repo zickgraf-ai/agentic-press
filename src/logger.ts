@@ -5,6 +5,10 @@ import { parseLogLevel } from "./types.js";
  * Create a structured pino logger. Exported for tests that need a fresh
  * instance with a custom destination; production code uses the module
  * singleton (default export).
+ *
+ * Unrecognized level strings silently default to "info" via parseLogLevel().
+ * A console.warn is emitted by parseLogLevel itself (bootstrap
+ * logger-of-last-resort) so operators still see feedback for typos.
  */
 export function createLogger(
   level?: string,
