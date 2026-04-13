@@ -1,8 +1,11 @@
 import { createProxyServer, type ProxyServerConfig } from "./mcp-proxy/server.js";
 import { createStdioBridge, type McpServerDef, type StdioBridge } from "./mcp-proxy/stdio-bridge.js";
 import { parseLogLevel } from "./types.js";
+import { childLogger } from "./logger.js";
 import { loadLangfuseConfig } from "./observability/config.js";
 import { createTracer, createNoopTracer, type Tracer } from "./observability/langfuse.js";
+
+const log = childLogger("main");
 
 // Parse MCP server definitions from env: JSON array of {name, command, args, env?}
 // Example: MCP_SERVERS='[{"name":"fs","command":"npx","args":["-y","@anthropic-ai/mcp-filesystem"]}]'
@@ -35,7 +38,7 @@ let bridge: StdioBridge | undefined;
 
 if (serverDefs.length > 0) {
   bridge = createStdioBridge(serverDefs, { logLevel });
-  console.log(`Stdio bridge created with ${serverDefs.length} server(s): ${serverDefs.map((s) => s.name).join(", ")}`);
+  log.info(`Stdio bridge created with ${serverDefs.length} server(s): ${serverDefs.map((s) => s.name).join(", ")}`);
 }
 
 const port = parseInt(process.env.MCP_PROXY_PORT ?? "18923", 10);
@@ -56,10 +59,10 @@ let tracer: Tracer;
 try {
   tracer = await createTracer(langfuseConfig);
   if (langfuseConfig.enabled) {
-    console.log(`Langfuse tracing enabled (host: ${langfuseConfig.host})`);
+    log.info({ host: langfuseConfig.host }, "Langfuse tracing enabled");
   }
 } catch (err) {
-  console.warn("[langfuse] createTracer failed at startup — falling back to no-op tracer:", err);
+  log.warn({ err }, "createTracer failed at startup — falling back to no-op tracer");
   tracer = createNoopTracer();
 }
 
@@ -76,19 +79,19 @@ const app = createProxyServer(config);
 
 // Bind 0.0.0.0 so the proxy is reachable from sbx sandboxes via host.docker.internal
 const server = app.listen(config.port, "0.0.0.0", () => {
-  console.log(`MCP proxy listening on 0.0.0.0:${config.port}`);
+  log.info({ port: config.port }, "MCP proxy listening on 0.0.0.0");
   if (!bridge) {
-    console.log("No MCP_SERVERS configured — running in stub mode (no forwarding)");
+    log.info("No MCP_SERVERS configured — running in stub mode (no forwarding)");
   }
 });
 
 // Graceful shutdown: close HTTP server first, then bridge + tracer, with 5s force-exit
 function shutdown(signal: string) {
-  console.log(`Received ${signal}, shutting down...`);
+  log.info({ signal }, "Received signal, shutting down...");
 
   // Force exit after 5s if graceful shutdown stalls
   const forceTimer = setTimeout(() => {
-    console.error("Shutdown timed out after 5s, forcing exit");
+    log.error("Shutdown timed out after 5s, forcing exit");
     process.exit(1);
   }, 5000);
   forceTimer.unref(); // Don't keep process alive just for the timer
@@ -101,7 +104,7 @@ function shutdown(signal: string) {
       tracer.shutdown(),
       new Promise<void>((resolve) =>
         setTimeout(() => {
-          console.warn("[shutdown] tracer.shutdown() timed out after 3s — proceeding");
+          log.warn("tracer.shutdown() timed out after 3s — proceeding");
           resolve();
         }, 3000).unref()
       ),
@@ -112,7 +115,7 @@ function shutdown(signal: string) {
     Promise.allSettled(tasks).then((results) => {
       for (const r of results) {
         if (r.status === "rejected") {
-          console.error("Shutdown task failed:", r.reason);
+          log.error({ err: r.reason }, "Shutdown task failed");
         }
       }
       process.exit(0);

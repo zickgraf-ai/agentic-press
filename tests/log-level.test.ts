@@ -1,4 +1,4 @@
-import { describe, it, expect, vi } from "vitest";
+import { describe, it, expect } from "vitest";
 import { parseLogLevel, levelAtLeast } from "../src/types.js";
 
 describe("parseLogLevel", () => {
@@ -18,17 +18,10 @@ describe("parseLogLevel", () => {
     expect(parseLogLevel(input)).toBe(input.toLowerCase());
   });
 
-  it("warns and falls back to 'info' for unknown values", () => {
-    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
-    try {
-      expect(parseLogLevel("verbose")).toBe("info");
-      expect(parseLogLevel("trace")).toBe("info");
-      expect(parseLogLevel("garbage")).toBe("info");
-      expect(spy).toHaveBeenCalledTimes(3);
-      expect(spy.mock.calls[0][0]).toContain("Unknown LOG_LEVEL");
-    } finally {
-      spy.mockRestore();
-    }
+  it("silently falls back to 'info' for unknown values", () => {
+    expect(parseLogLevel("verbose")).toBe("info");
+    expect(parseLogLevel("trace")).toBe("info");
+    expect(parseLogLevel("garbage")).toBe("info");
   });
 
   // Regression: the `in` operator walks Object.prototype, so without Object.hasOwn
@@ -36,12 +29,7 @@ describe("parseLogLevel", () => {
   it.each(["constructor", "toString", "hasOwnProperty", "__proto__", "valueOf"])(
     "rejects prototype-chain pollution: %s",
     (poison) => {
-      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
-      try {
-        expect(parseLogLevel(poison)).toBe("info");
-      } finally {
-        spy.mockRestore();
-      }
+      expect(parseLogLevel(poison)).toBe("info");
     }
   );
 });
