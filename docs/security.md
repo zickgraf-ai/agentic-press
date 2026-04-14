@@ -1,21 +1,24 @@
 # Security
 
-agentic-press sits between an untrusted, sandboxed agent and trusted MCP servers running on the host. Its security posture is built on four enforcement points: the MCP proxy allowlist, the response sanitizer, the path guard, and structured audit logging. This document describes the threat model, the defenses, and — explicitly — what is not defended.
+agentic-press sits between an untrusted, sandboxed agent and trusted MCP servers running on the host. Its security posture is built on four enforcement points: the MCP proxy allowlist, the request-argument sanitizer, the path guard, and structured audit logging. This document describes the threat model, the defenses, and — explicitly — what is not defended.
 
 Audience: security reviewers and any contributor touching `src/security/` or `src/mcp-proxy/sanitizer.ts`.
 
 See also: [architecture](./architecture.md), [observability](./observability.md), [development workflow](./development.md).
 
+> **Scope note.** As implemented today, the sanitizer runs on **tool-call request arguments** sent by the agent. It does **not** run on responses returned from upstream MCP servers. Whether to extend sanitization to responses is an open decision tracked in [#35](https://github.com/zickgraf-ai/agentic-press/issues/35). Threats that depend on response sanitization are flagged "Planned (#35)" in the table below.
+
 ## Threat Model
 
-The agent is treated as untrusted. So is every byte returned by an MCP server — a compromised or malicious server can reach the agent only through the proxy, and the proxy is the chokepoint where every mitigation runs.
+The agent is treated as untrusted. Upstream MCP servers are treated as trusted (vetted at deploy time); responses are forwarded to the agent unmodified. See [#35](https://github.com/zickgraf-ai/agentic-press/issues/35) for the open question of extending the trust boundary.
 
 | Threat | Mitigation | Code location |
 |---|---|---|
-| Prompt injection in MCP tool responses | Response sanitizer runs injection-pattern detection, returns `flag` / `strip` / `block` result | `src/mcp-proxy/sanitizer.ts`, `src/security/injection-patterns.ts` |
+| Prompt injection in agent tool-call arguments | Request-arg sanitizer runs injection-pattern detection, returns `flag` / `strip` / `block` result on the offending arg value | `src/mcp-proxy/sanitizer.ts`, `src/security/injection-patterns.ts` |
+| Prompt injection in MCP tool responses | **Planned (#35)** — responses are forwarded unsanitized today | — |
 | Path traversal in tool arguments (`../`, encoded variants) | Path guard normalizes, rejects encoded traversal, confines to workspace root | `src/security/path-guard.ts` |
 | Unauthorized tool call from agent | Allowlist check before forward; exact or suffix-wildcard match, fail-closed on malformed config | `src/mcp-proxy/allowlist.ts` |
-| Command/markup injection via crafted MCP responses | Sanitizer categories `markup_injection`, `system_override`, `encoded_payload` | `src/mcp-proxy/sanitizer.ts`, `src/security/injection-patterns.ts` |
+| Command/markup injection in tool-call arguments | Sanitizer categories `markup_injection`, `system_override`, `encoded_payload` applied to arg values | `src/mcp-proxy/sanitizer.ts`, `src/security/injection-patterns.ts` |
 | Symlink escape from workspace | Path guard resolves with `realpathSync` and re-checks containment after resolution | `src/security/path-guard.ts` |
 | Tool-result turn boundary forgery (fake `<|system|>`, `</tool_result>`) | `system_override` category in injection patterns | `src/security/injection-patterns.ts` |
 | Zero-width unicode smuggling of hidden instructions | `unicode_smuggling` category; stripped globally in `strip` mode | `src/security/injection-patterns.ts`, `src/mcp-proxy/sanitizer.ts` |
@@ -35,7 +38,7 @@ Malformed config (`null` / `undefined` / missing `patterns`) and empty tool name
 
 ### Sanitizer Pipeline
 
-The sanitizer is called on every MCP response body before it reaches the agent. It runs each pattern in `src/security/injection-patterns.ts` against the content, then applies one of three modes:
+The sanitizer is called on every string-valued tool-call argument before the call is forwarded to the upstream MCP server. It runs each pattern in `src/security/injection-patterns.ts` against the content, then applies one of three modes:
 
 - `flag` (default): return content unchanged with a structured list of flags (pattern name, matched substring, position).
 - `strip`: remove every matched substring; zero-width characters are stripped globally regardless of which pattern matched them.
@@ -74,13 +77,13 @@ No code or pattern is ported from Ren or Wake. This is a non-negotiable project 
 
 | CVE | Description | Our mitigation |
 |---|---|---|
-| CVE-2025-6514 (CVSS 9.6) | `mcp-remote` arbitrary OS command execution via crafted `authorization_endpoint` URLs | Allowlist blocks unknown tools; sanitizer `system_override` category flags injected tool/function-call blocks in responses |
+| CVE-2025-6514 (CVSS 9.6) | `mcp-remote` arbitrary OS command execution via crafted `authorization_endpoint` URLs | Allowlist blocks unknown tools; sanitizer `system_override` category catches injected tool/function-call blocks if they appear in tool-call arguments. Response-side mitigation is pending #35 |
 | CVE-2025-53110 | Filesystem MCP Server directory-containment bypass | Path guard enforces workspace-root containment on both logical and symlink-resolved paths |
 | CVE-2025-53109 | Filesystem MCP Server symlink-traversal bypass | Path guard calls `realpathSync` and re-runs the containment check after symlink resolution |
 
 ## Audit Logging
 
-Every MCP request and response passes through `src/mcp-proxy/logger.ts` and is emitted as a structured JSON log line (pino). Every sanitizer flag and every allowlist rejection is logged with enough context — tool name, pattern name, match position, sanitize mode, decision — to reconstruct what the proxy saw and what it did. Logs are the authoritative audit record; see [observability](./observability.md) for sinks, retention, and Langfuse tracing.
+Every MCP request passes through `src/mcp-proxy/logger.ts` and is emitted as a structured JSON log line (pino). Every sanitizer flag and every allowlist rejection is logged with enough context — tool name, pattern name, match position, sanitize mode, decision — to reconstruct what the proxy saw and what it did. Logs are the authoritative audit record; see [observability](./observability.md) for sinks, retention, and Langfuse tracing. Test-coverage gaps for the audit-logging path are tracked in [#34](https://github.com/zickgraf-ai/agentic-press/issues/34).
 
 ## What Is Not Defended
 
