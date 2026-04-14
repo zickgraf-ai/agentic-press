@@ -39,4 +39,4 @@ We test for these attack vectors in MCP tool responses and requests:
 
 ## Clean-Room Requirement
 
-All patterns MUST be sourced from public research (OWASP, MCP spec, published CVEs, public blog posts). NEVER port patterns from any employer's codebase (Ren, Wake, or any other). This is a legal and IP separation requirement.
+All patterns MUST be sourced from public research (OWASP, MCP spec, published CVEs, public blog posts). NEVER port patterns from any proprietary or non-public source. This is a legal and IP separation requirement.
