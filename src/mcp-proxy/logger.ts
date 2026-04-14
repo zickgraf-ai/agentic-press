@@ -1,6 +1,8 @@
 import type { SanitizeFlag } from "./sanitizer.js";
 import type { AuditStatus } from "../types.js";
 
+export type AuditDirection = "request" | "response";
+
 export interface AuditEntry {
   readonly timestamp: string;
   readonly tool: string;
@@ -8,6 +10,12 @@ export interface AuditEntry {
   readonly status: AuditStatus;
   readonly flags: readonly SanitizeFlag[];
   readonly durationMs?: number;
+  /**
+   * Which pipeline stage produced this entry. "request" covers allowlist,
+   * request-arg sanitization, and path guard. "response" covers upstream
+   * MCP server response sanitization. Defaults to "request" when omitted.
+   */
+  readonly direction?: AuditDirection;
   /**
    * Optional operator-facing error message. Set on the error path so later
    * audit-log searches can correlate failures without joining against
