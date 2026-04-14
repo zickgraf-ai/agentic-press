@@ -19,7 +19,7 @@ describe("parseLogLevel", () => {
   });
 
   it("warns and falls back to 'info' for unknown values", () => {
-    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
       expect(parseLogLevel("verbose")).toBe("info");
       expect(parseLogLevel("trace")).toBe("info");
@@ -36,7 +36,7 @@ describe("parseLogLevel", () => {
   it.each(["constructor", "toString", "hasOwnProperty", "__proto__", "valueOf"])(
     "rejects prototype-chain pollution: %s",
     (poison) => {
-      const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const spy = vi.spyOn(console, "warn").mockImplementation(() => {});
       try {
         expect(parseLogLevel(poison)).toBe("info");
       } finally {

@@ -1,5 +1,8 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { levelAtLeast, type LogLevel } from "../types.js";
+import { childLogger } from "../logger.js";
+
+const log = childLogger("stdio-bridge");
 
 export interface McpServerDef {
   name: string;
@@ -94,14 +97,15 @@ function handleNonJsonLine(
   const truncated = line.slice(0, 200);
 
   if (levelAtLeast(logLevel, "debug")) {
-    console.error(`[stdio-bridge] Non-JSON line from "${name}": ${truncated}`);
+    log.debug({ server: name, nonJsonLine: truncated }, "Non-JSON line from server");
   } else if (!managed.warnedAboutNonJson) {
     // One-shot per-server warning — always emitted regardless of log level.
     // A protocol violation on the transport channel is never something an
-    // operator wants silently dropped.
-    console.error(
-      `[stdio-bridge] WARN: Non-JSON output detected on "${name}" stdout ` +
-        `(set LOG_LEVEL=debug for all lines): ${truncated}`
+    // operator wants silently dropped. Uses error level so it is never
+    // filtered, even at LOG_LEVEL=error.
+    log.error(
+      { server: name, nonJsonLine: truncated },
+      "Non-JSON output detected on stdout (set LOG_LEVEL=debug for all lines)"
     );
     managed.warnedAboutNonJson = true;
   }
@@ -125,7 +129,7 @@ function handleNonJsonLine(
     try {
       managed.proc.kill();
     } catch (err) {
-      console.error(`[stdio-bridge] Failed to kill broken server "${name}":`, err);
+      log.error({ server: name, err }, "Failed to kill broken server");
     }
   }
 }
@@ -330,7 +334,7 @@ export async function shutdownOne(
   try {
     proc.kill();
   } catch (err) {
-    console.error(`[stdio-bridge] SIGTERM to "${name}" failed:`, err);
+    log.error({ server: name, err }, "SIGTERM failed");
   }
 
   // Race graceful exit against the grace period
@@ -345,11 +349,11 @@ export async function shutdownOne(
   if (result === "exited") return;
 
   // Grace period exceeded — escalate to SIGKILL and wait for actual exit
-  console.error(`[stdio-bridge] Server "${name}" did not exit within ${gracePeriodMs}ms, sending SIGKILL`);
+  log.error({ server: name, gracePeriodMs }, "Server did not exit within grace period, sending SIGKILL");
   try {
     proc.kill("SIGKILL");
   } catch (err) {
-    console.error(`[stdio-bridge] SIGKILL to "${name}" failed:`, err);
+    log.error({ server: name, err }, "SIGKILL failed");
   }
 
   // SIGKILL is async — wait for the actual exit event before returning (#C-1)
@@ -365,6 +369,6 @@ export async function shutdownOne(
     // Process is wedged — clean up the listener we never collected from to avoid
     // a leaked listener on a stale ChildProcess reference.
     if (onExit) proc.removeListener("exit", onExit);
-    console.error(`[stdio-bridge] Server "${name}" still alive ${hardCeilingMs}ms after SIGKILL — leaking`);
+    log.error({ server: name, hardCeilingMs }, "Server still alive after SIGKILL — leaking");
   }
 }
