@@ -84,7 +84,7 @@ No code or pattern is ported from any proprietary or non-public source. This is 
 
 ## Audit Logging
 
-Every MCP request passes through `src/mcp-proxy/logger.ts` and is emitted as a structured JSON log line (pino). Every sanitizer flag and every allowlist rejection is logged with enough context — tool name, pattern name, match position, sanitize mode, decision — to reconstruct what the proxy saw and what it did. Logs are the authoritative audit record; see [observability](./observability.md) for sinks, retention, and Langfuse tracing. Test-coverage gaps for the audit-logging path are tracked in [#34](https://github.com/zickgraf-ai/agentic-press/issues/34).
+Every MCP request passes through `src/mcp-proxy/logger.ts` and is emitted as one NDJSON object per line on stdout (separate from the pino operator log; see [observability](./observability.md) for the distinction). Every sanitizer flag and every allowlist rejection is logged with enough context — tool name, pattern name, match position, sanitize mode, decision — to reconstruct what the proxy saw and what it did. Logs are the authoritative audit record; see [observability](./observability.md) for sinks, retention, and Langfuse tracing. Test-coverage gaps for the audit-logging path are tracked in [#34](https://github.com/zickgraf-ai/agentic-press/issues/34).
 
 ## Operator Responsibilities
 

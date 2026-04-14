@@ -26,12 +26,12 @@ source module calls `childLogger("<module>")` so log records carry a stable
 
 ### Levels
 
-`LOG_LEVEL` accepts pino's standard ladder: `trace`, `debug`, `info`, `warn`,
-`error`, `fatal`. Unknown values fall back to `info` with a one-line warning
-emitted through `console.warn` from `parseLogLevel` in `src/types.ts`. The
-stdio bridge references `LOG_LEVEL=debug` in its own diagnostics — at `debug`
-the bridge prints every non-JSON stdout line from a backend MCP server instead
-of summarizing.
+`LOG_LEVEL` accepts `debug`, `info`, `warn`, `error` (defined as the `LogLevel`
+type in `src/types.ts`). Other pino levels (`trace`, `fatal`) and any unknown
+value fall back to `info` with a one-line warning emitted through
+`console.warn` from `parseLogLevel`. The stdio bridge references
+`LOG_LEVEL=debug` in its own diagnostics — at `debug` the bridge prints every
+non-JSON stdout line from a backend MCP server instead of summarizing.
 
 ### Fields
 
@@ -137,8 +137,8 @@ one trace with the expected outcome.
 
 `src/observability/metrics.ts` contains signature stubs only — every exported
 function throws `Not implemented`. There are no metrics tests, and no Alloy
-or Prometheus config ships in the repo. `ARCHITECTURE.md` keeps metrics in
-the v0.4.0 phase.
+or Prometheus config ships in the repo. Phase planning for metrics lives in
+`CLAUDE.md`.
 
 ### Planned shape
 
@@ -153,8 +153,8 @@ The stub signatures imply the following once implemented:
 
 Labels and exact metric names are not frozen — they will be defined when
 #10 lands. Expect a GET `/metrics` endpoint on a separate port
-(`METRICS_PORT`, default 9090 per the observability skill) so the audit
-port (`/mcp`) is never mixed with scrape traffic.
+(`METRICS_PORT`, default `9090` in `.env.example`) so the audit port (`/mcp`)
+is never mixed with scrape traffic.
 
 ## Grafana / Loki (Planned, #10)
 

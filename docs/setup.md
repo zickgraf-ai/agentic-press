@@ -15,7 +15,7 @@ The `sbx` CLI ships with Docker Desktop. If `sbx` is missing, update Docker Desk
 ## 2. Clone and install
 
 ```bash
-git clone https://github.com/<org>/agentic-press.git
+git clone https://github.com/zickgraf-ai/agentic-press.git
 cd agentic-press
 npm install
 cp .env.example .env
