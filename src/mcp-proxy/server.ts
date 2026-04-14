@@ -5,6 +5,7 @@ import { childLogger } from "../logger.js";
 import { checkAllowlist, matchesPattern, type AllowlistConfig } from "./allowlist.js";
 import { checkPath } from "../security/path-guard.js";
 import { sanitize } from "./sanitizer.js";
+import { sanitizeResponse } from "./response-sanitizer.js";
 import { logAuditEntry, type AuditEntry } from "./logger.js";
 import type { StdioBridge } from "./stdio-bridge.js";
 import {
@@ -160,7 +161,8 @@ export function createProxyServer(config: ProxyServerConfig): Express {
       args: Record<string, unknown>,
       status: AuditEntry["status"],
       flags: AuditEntry["flags"] = [],
-      errorMessage?: string
+      errorMessage?: string,
+      direction: AuditEntry["direction"] = "request"
     ) {
       logAuditEntry({
         timestamp: new Date().toISOString(),
@@ -169,6 +171,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
         status,
         flags,
         durationMs: Date.now() - start,
+        direction,
         ...(errorMessage !== undefined ? { errorMessage } : {}),
       });
     }
@@ -278,7 +281,26 @@ export function createProxyServer(config: ProxyServerConfig): Express {
         .call(serverName, "tools/call", params)
         .then((result) => {
           if (res.headersSent) return;
-          audit(tool, toolArgs, "allowed");
+          // Response-side sanitization: upstream MCP server output is
+          // attacker-controlled (see CVE-2025-6514). Walk string-valued
+          // fields; reject the entire response on any flag so raw matched
+          // content never reaches the agent.
+          const respFlags = sanitizeResponse(result).flags;
+          if (respFlags.length > 0) {
+            const patternStrings = [...new Set(respFlags.map((f) => f.pattern))];
+            audit(tool, toolArgs, "flagged", respFlags, undefined, "response");
+            safeSpan({ tool, status: "flagged", durationMs: Date.now() - start, flags: patternStrings });
+            safeEnd({ outcome: "flagged" });
+            res.json(
+              jsonRpcError(
+                requestId,
+                -32600,
+                `Response blocked by response sanitizer (ref: ${correlationId})`
+              )
+            );
+            return;
+          }
+          audit(tool, toolArgs, "allowed", [], undefined, "response");
           safeSpan({ tool, status: "allowed", durationMs: Date.now() - start });
           safeEnd({ outcome: "allowed" });
           res.json({ jsonrpc: "2.0", id: requestId, result });
