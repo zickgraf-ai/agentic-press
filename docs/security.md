@@ -72,7 +72,7 @@ Every pattern, threat, and mitigation in this codebase is sourced from public ma
 - MCP specification security considerations
 - Public CVE advisories
 
-No code or pattern is ported from Ren or Wake. This is a non-negotiable project rule — see `CLAUDE.md`. Contributors modifying `src/security/` or `src/mcp-proxy/sanitizer.ts` must cite a public source in the file header comment and run the security test suite before opening a PR.
+No code or pattern is ported from any proprietary or non-public source. This is a non-negotiable project rule. Contributors modifying `src/security/` or `src/mcp-proxy/sanitizer.ts` must cite a public source in the file header comment and run the security test suite before opening a PR.
 
 ## CVE References
 

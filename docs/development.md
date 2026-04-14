@@ -106,7 +106,7 @@ Every PR is reviewed using the `pr-review-toolkit` before merge. Expect findings
 
 Changes under `src/security/` or `src/mcp-proxy/` (including the sanitizer, allowlist, and stdio bridge) require **Plan Mode first**. Write the plan, get it reviewed, then implement under TDD. Run the full security test suite after any change to these paths.
 
-Clean-room rule: injection patterns and security logic are derived from public sources only (OWASP Top 10 for LLM Apps, the MCP spec, published CVEs). Do not port code from Ren or Wake. See [./security.md](./security.md) for CVE references and the threat model.
+Clean-room rule: injection patterns and security logic are derived from public sources only (OWASP Top 10 for LLM Apps, the MCP spec, published CVEs). Do not port code from any proprietary or non-public source. See [./security.md](./security.md) for CVE references and the threat model.
 
 ## 10. Cleanup After Merge
 
