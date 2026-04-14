@@ -36,27 +36,14 @@ npm run typecheck  # Type check without emitting
 npm run lint       # Lint
 ```
 
-## Architecture
+## Documentation
 
-```
-Docker Sandbox (sbx)                 Host Machine
-┌──────────────────────┐            ┌─────────────────────────────────────┐
-│                      │            │                                     │
-│  AI Agent            │  JSON-RPC  │  MCP Proxy Server (:18923)          │
-│  (Claude Code, etc.) ├───────────►│  ┌─────────────────────────────┐   │
-│                      │  over HTTP │  │ 1. Allowlist check           │   │
-│  Connects via        │            │  │ 2. Path guard                │   │
-│  host.docker.        │            │  │ 3. Forward to MCP server     │   │
-│  internal:18923      │            │  │ 4. Sanitize response         │   │
-│                      │◄───────────┤  │ 5. Audit log                 │   │
-│                      │  filtered  │  └──────────────┬──────────────┘   │
-└──────────────────────┘  response  │                 │ stdio            │
-                                    │  ┌──────────────▼──────────────┐   │
-                                    │  │ MCP Servers                  │   │
-                                    │  │ - filesystem, git, github    │   │
-                                    │  └─────────────────────────────┘   │
-                                    └─────────────────────────────────────┘
-```
+- [`docs/architecture.md`](docs/architecture.md) — MCP proxy architecture, request pipeline, security boundaries
+- [`docs/setup.md`](docs/setup.md) — install, environment variables, first run
+- [`docs/sbx-reference.md`](docs/sbx-reference.md) — sbx commands this project relies on
+- [`docs/security.md`](docs/security.md) — threat model, injection patterns, CVE references
+- [`docs/observability.md`](docs/observability.md) — Langfuse tracing, structured logging, planned metrics
+- [`docs/development.md`](docs/development.md) — TDD loop, fresh-sandbox-per-issue dogfooding, PR workflow
 
 ## License
 
