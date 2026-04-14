@@ -284,17 +284,37 @@ export function createProxyServer(config: ProxyServerConfig): Express {
           // Response-side sanitization: upstream MCP server output is
           // attacker-controlled (see CVE-2025-6514). Walk string-valued
           // fields; reject the entire response on any flag so raw matched
-          // content never reaches the agent.
-          const respFlags = sanitizeResponse(result).flags;
+          // content never reaches the agent. Fail CLOSED: if the walker
+          // itself throws (pathological input, e.g. deep/cyclic hostile
+          // response), treat it as a rejection, not a pass-through.
+          let respFlags;
+          try {
+            respFlags = sanitizeResponse(result).flags;
+          } catch (sanitizeErr) {
+            const rawMessage = sanitizeErr instanceof Error ? sanitizeErr.message : String(sanitizeErr);
+            reqLog.error({ server: serverName, error: rawMessage }, "Response sanitizer threw");
+            audit(tool, toolArgs, "error", [], rawMessage, "response");
+            safeSpan({ tool, status: "error", durationMs: Date.now() - start });
+            safeEnd({ outcome: "error" });
+            res.json(
+              jsonRpcError(
+                requestId,
+                -32001,
+                `Response blocked by response sanitizer (ref: ${correlationId})`
+              )
+            );
+            return;
+          }
           if (respFlags.length > 0) {
             const patternStrings = [...new Set(respFlags.map((f) => f.pattern))];
-            audit(tool, toolArgs, "flagged", respFlags, undefined, "response");
+            const operatorSummary = `response sanitizer: ${patternStrings.join(", ")}`;
+            audit(tool, toolArgs, "flagged", respFlags, operatorSummary, "response");
             safeSpan({ tool, status: "flagged", durationMs: Date.now() - start, flags: patternStrings });
             safeEnd({ outcome: "flagged" });
             res.json(
               jsonRpcError(
                 requestId,
-                -32600,
+                -32001,
                 `Response blocked by response sanitizer (ref: ${correlationId})`
               )
             );
