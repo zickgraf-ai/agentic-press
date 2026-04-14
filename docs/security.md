@@ -44,6 +44,8 @@ The sanitizer is called on every string-valued tool-call argument before the cal
 - `strip`: remove every matched substring; zero-width characters are stripped globally regardless of which pattern matched them.
 - `block`: replace the entire body with a fixed blocked-content marker.
 
+These modes describe the **sanitizer library's** behaviour. The **proxy server** layered on top rejects the tool call whenever the sanitizer returns any flag, regardless of which mode the library used. So `flag` mode is not "permissive" at the proxy boundary — it just means the sanitizer reports findings instead of mutating the input before the server applies its reject-on-any-flag policy.
+
 Each `InjectionPattern` owns both its `test()` and `find()` methods so there is exactly one regex per concept — the sanitizer never duplicates pattern logic.
 
 ### Injection Pattern Categories
@@ -68,7 +70,6 @@ Every pattern, threat, and mitigation in this codebase is sourced from public ma
 
 - OWASP Top 10 for LLM Applications (2025)
 - MCP specification security considerations
-- `invariantlabs.ai` published MCP attack-vector research
 - Public CVE advisories
 
 No code or pattern is ported from Ren or Wake. This is a non-negotiable project rule — see `CLAUDE.md`. Contributors modifying `src/security/` or `src/mcp-proxy/sanitizer.ts` must cite a public source in the file header comment and run the security test suite before opening a PR.

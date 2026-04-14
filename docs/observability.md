@@ -61,8 +61,7 @@ operator-facing diagnostics.
 
 ## Tracing (Langfuse)
 
-Implemented in `src/observability/langfuse.ts` and `config.ts`. Landed in
-commit `42d8f36`.
+Implemented in `src/observability/langfuse.ts` and `config.ts` (PR [#30](https://github.com/zickgraf-ai/agentic-press/pull/30)).
 
 ### Enabling
 

@@ -6,7 +6,7 @@ For what gets built and why, see [./architecture.md](./architecture.md). For day
 
 ## 1. Prerequisites
 
-- **Docker Desktop** with Sandbox support enabled. Verify: `docker --version` and `sbx --version` both return without error.
+- **Docker Desktop** with Sandbox support enabled. Verify: `docker --version` and `sbx version` both return without error. (Note: it's `sbx version`, not `sbx --version` — see [./sbx-reference.md](./sbx-reference.md).)
 - **Node.js >= 20.** Verify: `node --version`.
 - **Git** and **curl** on the host.
 
@@ -46,6 +46,7 @@ Commented-out variables in `.env.example`:
 | Variable | Purpose |
 |---|---|
 | `MCP_SERVERS` | JSON array of backing MCP servers, e.g. `[{"name":"filesystem","command":"npx","args":["-y","@modelcontextprotocol/server-filesystem","/workspace"]}]`. Required for real use; the integration script sets its own inline. |
+| `SERVER_ROUTES` | **Required alongside `MCP_SERVERS`.** JSON object mapping tool-name globs to server names, e.g. `{"filesystem.*":"filesystem"}`. Without it the proxy boots but cannot route any tool call. Not yet present in `.env.example` — tracked in [#33](https://github.com/zickgraf-ai/agentic-press/issues/33). `scripts/sandbox-run.sh` sets it inline. |
 | `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` / `LANGFUSE_HOST` | Langfuse tracing. Proxy runs fine without them. See [./observability.md](./observability.md). |
 | `MISSION_CONTROL_URL` / `MISSION_CONTROL_API_KEY` | Mission Control dashboard integration. See [./development.md](./development.md). |
 
@@ -79,15 +80,15 @@ What it does, step by step:
 1. **Pre-flight** — fails if `MCP_PROXY_PORT` (default `18923`) is already bound.
 2. **Build** — compiles TypeScript to `dist/`.
 3. **Start proxy** — launches `node dist/index.js` with an echo MCP server (`scripts/echo-mcp-server.js`) as the backend. Sets `ALLOWED_TOOLS=echo__*`, `MCP_SERVERS=[{...echo...}]`, `SERVER_ROUTES={"echo__*":"echo"}`, and redirects proxy output to a temp audit log. Waits up to 10 s for `GET /health` to return `"ok"`.
-3. **Create sandbox** — `sbx create --name integration-test-<pid> shell <project-dir>`. Then opens a network policy with `sbx policy allow network "host.docker.internal:<port>,localhost:<port>"` so the sandbox can reach the proxy on the host.
-4. **Exercise the stdio bridge** from inside the sandbox via `sbx exec ... curl -X POST http://host.docker.internal:<port>/mcp`:
+4. **Create sandbox** — `sbx create --name integration-test-<pid> shell <project-dir>`. Then opens a network policy with `sbx policy allow network "host.docker.internal:<port>,localhost:<port>"` so the sandbox can reach the proxy on the host.
+5. **Exercise the stdio bridge** from inside the sandbox via `sbx exec ... curl -X POST http://host.docker.internal:<port>/mcp`:
    - Health check
    - Allowed tool call → echo server round-trip
    - Blocked tool (not in allowlist) → rejection
    - Prompt-injection string → rejection
    - Path-traversal (`../../etc/passwd`) → rejection
-5. **Audit verification** — greps the proxy log for `"status":"allowed"`, `"blocked"`, and `"flagged"` entries.
-6. **Cleanup** (trap on exit) — kills the proxy, runs `sbx stop` + `sbx rm`, removes the per-run network policies, deletes the audit log.
+6. **Audit verification** — greps the proxy log for `"status":"allowed"`, `"blocked"`, and `"flagged"` entries.
+7. **Cleanup** (trap on exit) — kills the proxy, runs `sbx stop` + `sbx rm`, removes the per-run network policies, deletes the audit log.
 
 Expected output ends with `INTEGRATION TEST PASSED`. If it fails, the trap still cleans up; rerun with `LOG_LEVEL=debug ./scripts/sandbox-run.sh` for verbose stdio bridge diagnostics.
 

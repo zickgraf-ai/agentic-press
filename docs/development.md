@@ -116,7 +116,7 @@ After the PR is merged, tear down the sandbox and any stray branches:
 sbx rm ap-<short-slug>
 git worktree list                 # identify stale worktrees
 git worktree remove <path>        # if any are left over
-git branch -D pr-NN               # gh pr checkout leaves these behind
+git branch -d pr-NN               # gh pr checkout leaves these behind; -d is safe (refuses if unmerged), use -D only if you've confirmed the branch is in main
 git fetch --prune                 # drop deleted remote branches locally
 ```
 

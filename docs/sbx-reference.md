@@ -1,5 +1,7 @@
 # sbx Reference
 
+> **Version warning.** Every command and behaviour in this doc is verified against sbx **v0.23.0** on macOS Apple Silicon. Run `sbx version` before copy-pasting; if the output is newer, re-verify the command against `sbx <subcommand> --help` and update this doc as needed.
+
 Project-local cheatsheet for the Docker Sandbox (sbx) CLI commands agentic-press relies on. Not a full sbx manual — only what is needed for the dogfooding workflow.
 
 For project setup see [./setup.md](./setup.md). For the day-to-day contributor loop see [./development.md](./development.md). For how sbx fits the MCP proxy see [./architecture.md](./architecture.md).
@@ -11,8 +13,6 @@ sbx version
 # Client Version:  v0.23.0
 # Server Version:  v0.23.0
 ```
-
-All commands and behaviours below are verified against sbx **v0.23.0** on macOS Apple Silicon. Newer versions may diverge — re-verify before updating this doc.
 
 ## Command surface used by this project
 
