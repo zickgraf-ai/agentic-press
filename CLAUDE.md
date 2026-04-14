@@ -23,7 +23,7 @@ npm run dev          # Start MCP proxy (tsx)
 ## Security Requirements (NON-NEGOTIABLE)
 
 - All injection patterns are **clean-room** from public sources: OWASP Top 10 for LLM Apps, MCP spec, published CVEs
-- **DO NOT** port code from Ren or Wake — clean-room only
+- **DO NOT** port code from any proprietary or non-public source — clean-room only
 - MCP proxy MUST validate all tool calls against allowlist before forwarding
 - Reference CVEs:
   - CVE-2025-6514 (mcp-remote, CVSS 9.6 — arbitrary OS command execution via crafted authorization_endpoint URLs)
@@ -46,7 +46,7 @@ npm run dev          # Start MCP proxy (tsx)
 - Custom web dashboard (adopt Mission Control)
 - Auth or multi-tenancy (single-user only)
 - OMC integration, AWS headless, or multi-agent (Phase 2)
-- Any code ported from Ren or Wake
+- Any code ported from a proprietary or non-public source
 
 ## Development Workflow
 
