@@ -86,17 +86,16 @@ No code or pattern is ported from any proprietary or non-public source. This is 
 
 Every MCP request passes through `src/mcp-proxy/logger.ts` and is emitted as a structured JSON log line (pino). Every sanitizer flag and every allowlist rejection is logged with enough context — tool name, pattern name, match position, sanitize mode, decision — to reconstruct what the proxy saw and what it did. Logs are the authoritative audit record; see [observability](./observability.md) for sinks, retention, and Langfuse tracing. Test-coverage gaps for the audit-logging path are tracked in [#34](https://github.com/zickgraf-ai/agentic-press/issues/34).
 
-## What Is Not Defended
+## Operator Responsibilities
 
-The following risks are out of scope for this codebase. Deployers must address them separately.
+The proxy is one layer in a defense-in-depth strategy. The following concerns are out of scope for this codebase and must be handled by the deployer:
 
-- **Supply-chain compromise of MCP servers themselves.** The proxy inspects traffic but does not verify the integrity of the MCP server binaries or their dependencies. A malicious server that produces responses within our allowed patterns will be forwarded.
-- **Authentication on the proxy itself.** agentic-press is single-user by design. There is no user authentication, no API keys, and no multi-tenancy on the proxy listener. Network exposure of the proxy port is the deployer's responsibility.
-- **Resource exhaustion / DoS.** There are no rate limits, request-size limits, or concurrency caps in the proxy. A misbehaving agent or server can exhaust host resources.
-- **Sandbox escape.** Container isolation is owned by sbx; we do not harden the container runtime. See [architecture](./architecture.md) for the boundary.
-- **Secret exfiltration via allowed tools.** If `filesystem.readFile` is allowed and the agent reads a credential file inside the workspace, the allowlist will not stop it. Deployers must keep secrets out of the sandbox workspace.
-- **Novel injection vectors.** Pattern-based detection is a known-bad filter. Any technique not in the public sources listed above will pass through `flag` mode silently. Use `block` mode for high-assurance deployments.
-- **Semantic prompt-injection defense.** We detect syntactic markers, not semantic intent. A polite, well-formed instruction override using no flagged tokens will not be caught.
+- **MCP-server supply chain.** Vet and pin the MCP server implementations and their dependencies before deployment. The proxy inspects traffic but cannot attest to upstream binary integrity.
+- **Network access control.** Bind the proxy listener only to interfaces reachable by trusted sandboxes. Use a host firewall, reverse proxy, or VPN to restrict exposure. agentic-press is single-user by design — add authentication at the network or reverse-proxy layer if multi-tenancy is required.
+- **Rate limiting and resource caps.** Apply request-size, rate, and concurrency limits at the network or reverse-proxy layer. Set host-level cgroup or ulimit constraints on the proxy process and on sbx sandboxes.
+- **Container isolation.** Container hardening is owned by sbx. Keep sbx and Docker up to date and audit `sbx policy` rules. See [architecture](./architecture.md) for the trust boundary.
+- **Workspace secret hygiene.** The allowlist does not distinguish credential files from any other file. Keep secrets out of the sandbox workspace; mount them only through sbx's secret-management surface.
+- **Defense-in-depth for prompt injection.** Pattern-based detection is one layer; combine it with output validation, content provenance checks, and human-in-the-loop confirmation for high-stakes tool calls. Use `block` mode for high-assurance deployments.
 
 ## Verifying Defenses
 
