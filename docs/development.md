@@ -44,7 +44,7 @@ npm run dev       # tsx src/index.ts (starts the MCP proxy)
 
 TDD is required for application logic, MCP proxy behavior, allowlist rules, sanitizer rules, and anything in `src/security/` or `src/mcp-proxy/`.
 
-1. **Red.** Write a failing test in `tests/` named `*.test.ts`. Commit it. Real example: commit `e50576c test: security tests — injection patterns, sanitizer, allowlist, path guard (TDD Red)`.
+1. **Red.** Write a failing test in `tests/` named `*.test.ts`. Commit it with a `test:` prefix and a `(TDD Red)` suffix in the subject so the loop is visible in `git log`.
 2. **Green.** Write the minimum code to make the test pass. Commit.
 3. **Refactor.** Clean up. Tests stay green. Commit.
 
