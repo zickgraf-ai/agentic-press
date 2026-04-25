@@ -89,7 +89,7 @@ describe("createMissionControlAdapter", () => {
     expect(opts.headers["Content-Type"]).toBe("application/json");
     const body = JSON.parse(opts.body);
     expect(body.name).toBe("ap-test");
-    expect(body.role).toBe("sandbox-agent");
+    expect(body.role).toBe("agent");
 
     expect(session).toBeDefined();
     expect(session.sandboxName).toBe("ap-test");
@@ -125,7 +125,7 @@ describe("createMissionControlAdapter", () => {
     expect(body.status).toBe("completed");
   });
 
-  it("pushActivity calls POST /api/activities with event payload", async () => {
+  it("pushActivity calls POST /api/hermes/events with correct payload", async () => {
     fetchSpy.mockResolvedValueOnce({ ok: true });
 
     await adapter.pushActivity({
@@ -138,12 +138,15 @@ describe("createMissionControlAdapter", () => {
 
     expect(fetchSpy).toHaveBeenCalledTimes(1);
     const [url, opts] = fetchSpy.mock.calls[0]!;
-    expect(url).toBe("http://mc.local:3000/api/activities");
+    expect(url).toBe("http://mc.local:3000/api/hermes/events");
     expect(opts.method).toBe("POST");
     const body = JSON.parse(opts.body);
-    expect(body.type).toBe("tool_call");
-    expect(body.tool).toBe("Read");
-    expect(body.status).toBe("allowed");
+    expect(body.event).toBe("tool:tool_call");
+    expect(body.agent_name).toBe("agentic-press-proxy");
+    expect(body.source).toBe("mcp-proxy");
+    expect(body.data.tool).toBe("Read");
+    expect(body.data.status).toBe("allowed");
+    expect(body.data.durationMs).toBe(42);
   });
 
   it("swallows fetch errors and logs warning on registerSession", async () => {

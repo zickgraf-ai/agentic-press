@@ -85,7 +85,7 @@ export function createMissionControlAdapter(
     async registerSession(sandboxName: SandboxId, taskDescription?: string): Promise<DashboardSession> {
       const body = {
         name: sandboxName,
-        role: "sandbox-agent",
+        role: "agent",
         ...(taskDescription ? { description: taskDescription } : {}),
       };
 
@@ -116,10 +116,25 @@ export function createMissionControlAdapter(
     },
 
     async pushActivity(event: ActivityEvent): Promise<void> {
-      await safeFetch(`${config.url}/api/activities`, {
+      // MC's /api/hermes/events is the write endpoint for agent lifecycle
+      // events — it persists to the activities table and broadcasts via SSE.
+      // /api/activities is read-only (405 on POST).
+      await safeFetch(`${config.url}/api/hermes/events`, {
         method: "POST",
         headers: headers(),
-        body: JSON.stringify(event),
+        body: JSON.stringify({
+          event: `tool:${event.type}`,
+          agent_name: "agentic-press-proxy",
+          source: "mcp-proxy",
+          timestamp: event.timestamp,
+          data: {
+            tool: event.tool,
+            status: event.status,
+            durationMs: event.durationMs,
+            flags: event.flags,
+            errorMessage: event.errorMessage,
+          },
+        }),
       });
     },
 
