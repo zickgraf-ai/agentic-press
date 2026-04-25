@@ -15,6 +15,7 @@ import {
   type SpanToolCallParams,
   type EndTraceParams,
 } from "../observability/langfuse.js";
+import { createNoopEventBridge, type EventBridge } from "../dashboard/event-bridge.js";
 
 const log = childLogger("mcp-proxy");
 
@@ -26,6 +27,7 @@ export interface ProxyServerConfig {
   readonly bridge?: StdioBridge;
   readonly serverRoutes?: Record<string, string>; // tool pattern → server name
   readonly tracer?: Tracer;
+  readonly eventBridge?: EventBridge;
 }
 
 interface JsonRpcRequest {
@@ -118,6 +120,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
   const { bridge } = config;
   const sortedRoutes = config.serverRoutes ? sortRoutes(config.serverRoutes) : undefined;
   const tracer: Tracer = config.tracer ?? createNoopTracer();
+  const eventBridge: EventBridge = config.eventBridge ?? createNoopEventBridge();
 
   app.get("/health", (_req: Request, res: Response) => {
     res.json({ status: "ok", port: config.port });
@@ -156,6 +159,14 @@ export function createProxyServer(config: ProxyServerConfig): Express {
       }
     }
 
+    function safeEmit(entry: AuditEntry) {
+      try {
+        eventBridge.emit(entry);
+      } catch (err) {
+        reqLog.warn({ err }, "eventBridge.emit threw (ignored)");
+      }
+    }
+
     function audit(
       tool: string,
       args: Record<string, unknown>,
@@ -164,7 +175,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
       errorMessage?: string,
       direction: AuditEntry["direction"] = "request"
     ) {
-      logAuditEntry({
+      const entry: AuditEntry = {
         timestamp: new Date().toISOString(),
         tool,
         args,
@@ -173,7 +184,9 @@ export function createProxyServer(config: ProxyServerConfig): Express {
         durationMs: Date.now() - start,
         direction,
         ...(errorMessage !== undefined ? { errorMessage } : {}),
-      });
+      };
+      logAuditEntry(entry);
+      safeEmit(entry);
     }
 
     try {
