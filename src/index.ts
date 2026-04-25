@@ -1,39 +1,17 @@
 import { createProxyServer, type ProxyServerConfig } from "./mcp-proxy/server.js";
-import { createStdioBridge, type McpServerDef, type StdioBridge } from "./mcp-proxy/stdio-bridge.js";
+import { createStdioBridge, type StdioBridge } from "./mcp-proxy/stdio-bridge.js";
 import { parseLogLevel } from "./types.js";
 import { childLogger } from "./logger.js";
 import { loadLangfuseConfig } from "./observability/config.js";
 import { createTracer, createNoopTracer, type Tracer } from "./observability/langfuse.js";
+import { parseServerDefs, parseServerRoutes, validateServerConfig } from "./server-config.js";
 
 const log = childLogger("main");
 
-// Parse MCP server definitions from env: JSON array of {name, command, args, env?}
-// Example: MCP_SERVERS='[{"name":"fs","command":"npx","args":["-y","@anthropic-ai/mcp-filesystem"]}]'
-function parseServerDefs(): McpServerDef[] {
-  const raw = process.env.MCP_SERVERS;
-  if (!raw) return [];
-  try {
-    return JSON.parse(raw) as McpServerDef[];
-  } catch (err) {
-    throw new Error(`Failed to parse MCP_SERVERS: ${err instanceof Error ? err.message : err}`);
-  }
-}
-
-// Parse tool→server routing from env: JSON object of pattern→serverName
-// Example: SERVER_ROUTES='{"fs__*":"fs","echo__*":"echo"}'
-function parseServerRoutes(): Record<string, string> | undefined {
-  const raw = process.env.SERVER_ROUTES;
-  if (!raw) return undefined;
-  try {
-    return JSON.parse(raw) as Record<string, string>;
-  } catch (err) {
-    throw new Error(`Failed to parse SERVER_ROUTES: ${err instanceof Error ? err.message : err}`);
-  }
-}
-
 const logLevel = parseLogLevel(process.env.LOG_LEVEL);
-const serverDefs = parseServerDefs();
-const serverRoutes = parseServerRoutes();
+const serverDefs = parseServerDefs(process.env.MCP_SERVERS);
+const serverRoutes = parseServerRoutes(process.env.SERVER_ROUTES);
+validateServerConfig(serverDefs, serverRoutes);
 let bridge: StdioBridge | undefined;
 
 if (serverDefs.length > 0) {
@@ -81,7 +59,10 @@ const app = createProxyServer(config);
 const server = app.listen(config.port, "0.0.0.0", () => {
   log.info({ port: config.port }, "MCP proxy listening on 0.0.0.0");
   if (!bridge) {
-    log.info("No MCP_SERVERS configured — running in stub mode (no forwarding)");
+    log.warn(
+      "No MCP_SERVERS configured — running in STUB MODE. The proxy will accept requests but cannot route any tool call. " +
+        "Set MCP_SERVERS and SERVER_ROUTES in .env to enable forwarding. See docs/setup.md."
+    );
   }
 });
 
