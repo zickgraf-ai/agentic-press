@@ -1,4 +1,4 @@
-import type { AuditEntry, AuditDirection } from "../mcp-proxy/logger.js";
+import type { AuditEntry } from "../mcp-proxy/logger.js";
 import type { DashboardAdapter, ActivityEvent } from "./adapter.js";
 import { childLogger } from "../logger.js";
 
@@ -36,6 +36,10 @@ function mapStatusToType(status: AuditEntry["status"]): ActivityEvent["type"] {
     case "flagged": return "injection_flag";
     case "blocked": return "blocked";
     case "error": return "error";
+    default: {
+      const _exhaustive: never = status;
+      throw new Error(`Unmapped audit status: ${_exhaustive}`);
+    }
   }
 }
 
@@ -64,6 +68,9 @@ export function createEventBridge(adapter: DashboardAdapter): EventBridge {
 
     const p = adapter.pushActivity(event).catch((err) => {
       log.warn({ err }, "EventBridge push failed (ignored)");
+    }).finally(() => {
+      const idx = pending.indexOf(p);
+      if (idx !== -1) pending.splice(idx, 1);
     });
     pending.push(p);
   }

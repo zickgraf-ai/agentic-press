@@ -30,8 +30,8 @@ export interface DashboardAdapter {
 }
 
 /**
- * No-op adapter returned when the dashboard is disabled. Every method resolves
- * immediately — zero allocations per call on the hot path.
+ * No-op adapter returned when the dashboard is disabled. Methods resolve
+ * immediately with stub values; no network I/O occurs.
  */
 export function createNoopAdapter(): DashboardAdapter {
   return {
@@ -95,9 +95,17 @@ export function createMissionControlAdapter(
         body: JSON.stringify(body),
       });
 
-      const id = res?.ok
-        ? ((await res.json()) as { id: string }).id
-        : `fallback-${Date.now()}`;
+      let id: string;
+      try {
+        const parsed = res?.ok ? (await res.json()) as Record<string, unknown> : undefined;
+        id = typeof parsed?.id === "string" ? parsed.id : `fallback-${Date.now()}`;
+      } catch {
+        log.warn("Failed to parse registerSession response — using fallback ID");
+        id = `fallback-${Date.now()}`;
+      }
+      if (id.startsWith("fallback-")) {
+        log.warn({ sandboxName }, "Mission Control session registration degraded — using fallback ID");
+      }
 
       return {
         id: id as SessionId,

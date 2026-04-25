@@ -51,11 +51,16 @@ try {
 // not configured, startup must never fail because of the dashboard.
 const dashboardConfig = loadDashboardConfig(process.env);
 let eventBridge: EventBridge;
-if (dashboardConfig.enabled) {
-  const adapter = createMissionControlAdapter({ url: dashboardConfig.url, apiKey: dashboardConfig.apiKey });
-  eventBridge = createEventBridge(adapter);
-  log.info({ url: dashboardConfig.url }, "Mission Control dashboard enabled");
-} else {
+try {
+  if (dashboardConfig.enabled) {
+    const adapter = createMissionControlAdapter({ url: dashboardConfig.url, apiKey: dashboardConfig.apiKey });
+    eventBridge = createEventBridge(adapter);
+    log.info({ url: dashboardConfig.url }, "Mission Control dashboard enabled");
+  } else {
+    eventBridge = createNoopEventBridge();
+  }
+} catch (err) {
+  log.warn({ err }, "Dashboard init failed at startup — falling back to no-op event bridge");
   eventBridge = createNoopEventBridge();
 }
 
