@@ -4,6 +4,9 @@ import { parseLogLevel } from "./types.js";
 import { childLogger } from "./logger.js";
 import { loadLangfuseConfig } from "./observability/config.js";
 import { createTracer, createNoopTracer, type Tracer } from "./observability/langfuse.js";
+import { loadDashboardConfig } from "./dashboard/config.js";
+import { createNoopAdapter, createMissionControlAdapter } from "./dashboard/adapter.js";
+import { createNoopEventBridge, createEventBridge, type EventBridge } from "./dashboard/event-bridge.js";
 import { parseServerDefs, parseServerRoutes, validateServerConfig } from "./server-config.js";
 
 const log = childLogger("main");
@@ -44,6 +47,23 @@ try {
   tracer = createNoopTracer();
 }
 
+// Dashboard (Mission Control) — same pattern as Langfuse: opt-in, no-op when
+// not configured, startup must never fail because of the dashboard.
+const dashboardConfig = loadDashboardConfig(process.env);
+let eventBridge: EventBridge;
+try {
+  if (dashboardConfig.enabled) {
+    const adapter = createMissionControlAdapter({ url: dashboardConfig.url, apiKey: dashboardConfig.apiKey });
+    eventBridge = createEventBridge(adapter);
+    log.info({ url: dashboardConfig.url }, "Mission Control dashboard enabled");
+  } else {
+    eventBridge = createNoopEventBridge();
+  }
+} catch (err) {
+  log.warn({ err }, "Dashboard init failed at startup — falling back to no-op event bridge");
+  eventBridge = createNoopEventBridge();
+}
+
 const config: ProxyServerConfig = {
   port,
   allowedTools: (process.env.ALLOWED_TOOLS ?? "").split(",").filter(Boolean),
@@ -51,6 +71,7 @@ const config: ProxyServerConfig = {
   bridge,
   serverRoutes,
   tracer,
+  eventBridge,
 };
 
 const app = createProxyServer(config);
@@ -93,6 +114,7 @@ function shutdown(signal: string) {
     const tasks: Promise<unknown>[] = [];
     if (bridge) tasks.push(bridge.shutdown());
     tasks.push(tracerShutdown);
+    tasks.push(eventBridge.shutdown());
     Promise.allSettled(tasks).then((results) => {
       for (const r of results) {
         if (r.status === "rejected") {
