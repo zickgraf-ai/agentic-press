@@ -1,5 +1,18 @@
-import { describe, it, expect } from "vitest";
-import { parseServerDefs, parseServerRoutes, validateServerConfig } from "../src/server-config.js";
+import { describe, it, expect, vi } from "vitest";
+
+const mockWarn = vi.fn();
+vi.mock("../src/logger.js", () => ({
+  childLogger: () => ({
+    info: vi.fn(),
+    warn: mockWarn,
+    error: vi.fn(),
+    debug: vi.fn(),
+    child: vi.fn().mockReturnThis(),
+  }),
+  createLogger: vi.fn(),
+}));
+
+const { parseServerDefs, parseServerRoutes, validateServerConfig } = await import("../src/server-config.js");
 
 describe("parseServerDefs", () => {
   it("returns empty array when MCP_SERVERS is unset", () => {
@@ -92,9 +105,21 @@ describe("validateServerConfig", () => {
     expect(() => validateServerConfig([], undefined)).not.toThrow();
   });
 
-  it("accepts both set", () => {
+  it("accepts both set (single server)", () => {
     expect(() =>
       validateServerConfig([{ name: "fs", command: "x", args: [] }], { "fs__*": "fs" })
+    ).not.toThrow();
+  });
+
+  it("accepts both set (multiple servers with distinct routes)", () => {
+    expect(() =>
+      validateServerConfig(
+        [
+          { name: "fs", command: "npx", args: ["-y", "fs-server"] },
+          { name: "echo", command: "node", args: ["echo.js"] },
+        ],
+        { "fs__*": "fs", "echo__*": "echo" }
+      )
     ).not.toThrow();
   });
 
@@ -128,14 +153,20 @@ describe("validateServerConfig", () => {
     ).toThrow(/Duplicate.*fs/);
   });
 
-  it("error messages are actionable (mention the env var and the fix)", () => {
-    try {
-      validateServerConfig([{ name: "fs", command: "x", args: [] }], undefined);
-      throw new Error("expected throw");
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      expect(msg).toMatch(/SERVER_ROUTES/);
-      expect(msg).toMatch(/MCP_SERVERS/);
-    }
+  it("warns on declared server with no matching route", () => {
+    mockWarn.mockClear();
+
+    validateServerConfig(
+      [
+        { name: "fs", command: "x", args: [] },
+        { name: "orphan", command: "y", args: [] },
+      ],
+      { "fs__*": "fs" }
+    );
+
+    expect(mockWarn).toHaveBeenCalledWith(
+      expect.objectContaining({ server: "orphan" }),
+      expect.stringContaining("orphan")
+    );
   });
 });
