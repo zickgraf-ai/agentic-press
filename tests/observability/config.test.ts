@@ -11,7 +11,7 @@ vi.mock("../../src/logger.js", () => ({
   default: mockLogger, childLogger: vi.fn(() => mockLogger),
 }));
 
-import { loadLangfuseConfig } from "../../src/observability/config.js";
+import { loadLangfuseConfig, loadMetricsConfig } from "../../src/observability/config.js";
 
 describe("loadLangfuseConfig", () => {
   it("returns disabled when LANGFUSE_PUBLIC_KEY is missing", () => {
@@ -78,6 +78,61 @@ describe("loadLangfuseConfig", () => {
     expect(cfg.enabled).toBe(true);
     if (cfg.enabled) {
       expect(cfg.host).toBe("https://langfuse.example.com");
+    }
+  });
+});
+
+describe("loadMetricsConfig", () => {
+  it("returns disabled when METRICS_PORT is missing", () => {
+    const cfg = loadMetricsConfig({});
+    expect(cfg.enabled).toBe(false);
+  });
+
+  it("returns disabled when METRICS_PORT is empty string", () => {
+    const cfg = loadMetricsConfig({ METRICS_PORT: "" });
+    expect(cfg.enabled).toBe(false);
+  });
+
+  it("returns enabled with parsed port when METRICS_PORT is a valid integer", () => {
+    const cfg = loadMetricsConfig({ METRICS_PORT: "9090" });
+    expect(cfg.enabled).toBe(true);
+    if (cfg.enabled) {
+      expect(cfg.port).toBe(9090);
+    }
+  });
+
+  it("warns and returns disabled when METRICS_PORT is non-numeric", () => {
+    mockLogger.warn.mockClear();
+    const cfg = loadMetricsConfig({ METRICS_PORT: "abc" });
+    expect(cfg.enabled).toBe(false);
+    expect(mockLogger.warn).toHaveBeenCalled();
+  });
+
+  it("warns and returns disabled when METRICS_PORT is 0", () => {
+    mockLogger.warn.mockClear();
+    const cfg = loadMetricsConfig({ METRICS_PORT: "0" });
+    expect(cfg.enabled).toBe(false);
+    expect(mockLogger.warn).toHaveBeenCalled();
+  });
+
+  it("warns and returns disabled when METRICS_PORT is out of range high", () => {
+    mockLogger.warn.mockClear();
+    const cfg = loadMetricsConfig({ METRICS_PORT: "65536" });
+    expect(cfg.enabled).toBe(false);
+    expect(mockLogger.warn).toHaveBeenCalled();
+  });
+
+  it("does not warn when METRICS_PORT is missing entirely", () => {
+    mockLogger.warn.mockClear();
+    loadMetricsConfig({});
+    expect(mockLogger.warn).not.toHaveBeenCalled();
+  });
+
+  it("trims whitespace from METRICS_PORT", () => {
+    const cfg = loadMetricsConfig({ METRICS_PORT: "  9090  " });
+    expect(cfg.enabled).toBe(true);
+    if (cfg.enabled) {
+      expect(cfg.port).toBe(9090);
     }
   });
 });

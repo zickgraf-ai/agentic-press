@@ -16,6 +16,7 @@ import {
   type EndTraceParams,
 } from "../observability/langfuse.js";
 import { createNoopEventBridge, type EventBridge } from "../dashboard/event-bridge.js";
+import { createNoopRecorder, type MetricsRecorder } from "../observability/metrics.js";
 
 const log = childLogger("mcp-proxy");
 
@@ -28,6 +29,7 @@ export interface ProxyServerConfig {
   readonly serverRoutes?: Record<string, string>; // tool pattern → server name
   readonly tracer?: Tracer;
   readonly eventBridge?: EventBridge;
+  readonly recorder?: MetricsRecorder;
 }
 
 interface JsonRpcRequest {
@@ -134,6 +136,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
   const sortedRoutes = config.serverRoutes ? sortRoutes(config.serverRoutes) : undefined;
   const tracer: Tracer = config.tracer ?? createNoopTracer();
   const eventBridge: EventBridge = config.eventBridge ?? createNoopEventBridge();
+  const recorder: MetricsRecorder = config.recorder ?? createNoopRecorder();
 
   app.get("/health", (_req: Request, res: Response) => {
     res.json({ status: "ok", port: config.port });
@@ -180,13 +183,29 @@ export function createProxyServer(config: ProxyServerConfig): Express {
       }
     }
 
+    function safeRecord(entry: AuditEntry, blockReason?: string) {
+      try {
+        recorder.recordRequest(entry.tool, entry.status, entry.durationMs ?? 0);
+        if (entry.status === "flagged") {
+          for (const f of entry.flags) {
+            recorder.recordInjectionFlag(f.pattern);
+          }
+        } else if (entry.status === "blocked") {
+          recorder.recordBlockedRequest(blockReason ?? "unknown");
+        }
+      } catch (err) {
+        reqLog.warn({ err }, "recorder method threw (ignored)");
+      }
+    }
+
     function audit(
       tool: string,
       args: Record<string, unknown>,
       status: AuditEntry["status"],
       flags: AuditEntry["flags"] = [],
       errorMessage?: string,
-      direction: AuditEntry["direction"] = "request"
+      direction: AuditEntry["direction"] = "request",
+      blockReason?: string
     ) {
       const entry: AuditEntry = {
         timestamp: new Date().toISOString(),
@@ -200,6 +219,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
       };
       logAuditEntry(entry);
       safeEmit(entry);
+      safeRecord(entry, blockReason);
     }
 
     try {
@@ -245,7 +265,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
       // 1. Allowlist check
       const allowResult = checkAllowlist(tool, allowlistConfig);
       if (!allowResult.allowed) {
-        audit(tool, toolArgs, "blocked");
+        audit(tool, toolArgs, "blocked", [], undefined, "request", "allowlist");
         safeSpan({ tool, status: "blocked", durationMs: Date.now() - start });
         safeEnd({ outcome: "blocked" });
         res.json(jsonRpcError(requestId, -32600, allowResult.reason));
@@ -274,7 +294,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
       for (const p of paths) {
         const pathResult = checkPath(p, { workspaceRoot });
         if (!pathResult.allowed) {
-          audit(tool, toolArgs, "blocked");
+          audit(tool, toolArgs, "blocked", [], undefined, "request", "path_guard");
           safeSpan({ tool, status: "blocked", durationMs: Date.now() - start });
           safeEnd({ outcome: "blocked" });
           res.json(jsonRpcError(requestId, -32600, `Blocked path: ${pathResult.reason}`));
@@ -293,7 +313,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
 
       const serverName = resolveRoute(tool, sortedRoutes);
       if (!serverName) {
-        audit(tool, toolArgs, "blocked");
+        audit(tool, toolArgs, "blocked", [], undefined, "request", "no_route");
         safeSpan({ tool, status: "blocked", durationMs: Date.now() - start });
         safeEnd({ outcome: "blocked" });
         res.json(jsonRpcError(requestId, -32600, `No route configured for tool "${tool}"`));
