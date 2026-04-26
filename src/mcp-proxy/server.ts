@@ -7,7 +7,8 @@ import { checkPath } from "../security/path-guard.js";
 import { sanitize } from "./sanitizer.js";
 import { sanitizeResponse } from "./response-sanitizer.js";
 import { logAuditEntry, type AuditEntry } from "./logger.js";
-import { ResponseSizeExceededError, type StdioBridge } from "./stdio-bridge.js";
+import { ResponseSizeExceededError } from "./stdio-bridge.js";
+import type { McpTransport } from "./transport.js";
 import {
   createNoopTracer,
   type Tracer,
@@ -25,7 +26,7 @@ export interface ProxyServerConfig {
   readonly allowedTools: readonly string[];
   readonly logLevel: LogLevel;
   readonly workspaceRoot?: string;
-  readonly bridge?: StdioBridge;
+  readonly bridge?: McpTransport;
   readonly serverRoutes?: Record<string, string>; // tool pattern → server name
   readonly tracer?: Tracer;
   readonly eventBridge?: EventBridge;

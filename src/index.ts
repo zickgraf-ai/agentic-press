@@ -1,5 +1,12 @@
 import { createProxyServer, type ProxyServerConfig } from "./mcp-proxy/server.js";
-import { createStdioBridge, type StdioBridge } from "./mcp-proxy/stdio-bridge.js";
+import { createStdioBridge } from "./mcp-proxy/stdio-bridge.js";
+import { createHttpBridge } from "./mcp-proxy/http-bridge.js";
+import {
+  createCompositeTransport,
+  type McpTransport,
+  type McpStdioServerDef,
+  type McpHttpServerDef,
+} from "./mcp-proxy/transport.js";
 import { parseLogLevel } from "./types.js";
 import { childLogger } from "./logger.js";
 import { loadLangfuseConfig, loadMetricsConfig } from "./observability/config.js";
@@ -26,24 +33,47 @@ const logLevel = parseLogLevel(process.env.LOG_LEVEL);
 const serverDefs = parseServerDefs(process.env.MCP_SERVERS);
 const serverRoutes = parseServerRoutes(process.env.SERVER_ROUTES);
 validateServerConfig(serverDefs, serverRoutes);
-let bridge: StdioBridge | undefined;
+let bridge: McpTransport | undefined;
 
-// MAX_RESPONSE_BYTES caps the size of any single upstream MCP response line
-// at the stdio-bridge read layer. 0 disables the cap. Parser is fail-loud on
-// invalid input — silently falling back to the default would mask a typo in
-// env config and re-expose the OOM surface this guard exists to close.
+// MAX_RESPONSE_BYTES caps the size of any single upstream MCP response line.
+// Stdio enforces it at the read layer (pre-parse); HTTP enforces it after
+// receiving the body but before JSON.parse. 0 disables the cap. Parser is
+// fail-loud on invalid input — silently falling back to the default would
+// mask a typo in env config and re-expose the OOM surface this guard closes.
 const maxResponseBytes = parseMaxResponseBytes(process.env.MAX_RESPONSE_BYTES);
 
+// Partition server defs by transport. Each gets its own bridge implementation;
+// a composite transport routes call(serverName, ...) to the owning bridge.
+const stdioServers = serverDefs.filter((s): s is McpStdioServerDef => s.transport === "stdio");
+const httpServers = serverDefs.filter((s): s is McpHttpServerDef => s.transport === "http");
+
 if (serverDefs.length > 0) {
-  bridge = createStdioBridge(serverDefs, { logLevel, maxResponseBytes });
-  log.info(
-    {
-      serverCount: serverDefs.length,
-      servers: serverDefs.map((s) => s.name),
-      maxResponseBytes,
-    },
-    "Stdio bridge created"
-  );
+  const routes: { bridge: McpTransport; owns: string[] }[] = [];
+  if (stdioServers.length > 0) {
+    const stdioBridge = createStdioBridge(stdioServers, { logLevel, maxResponseBytes });
+    routes.push({ bridge: stdioBridge, owns: stdioServers.map((s) => s.name) });
+    log.info(
+      {
+        serverCount: stdioServers.length,
+        servers: stdioServers.map((s) => s.name),
+        maxResponseBytes,
+      },
+      "Stdio bridge created"
+    );
+  }
+  if (httpServers.length > 0) {
+    const httpBridge = createHttpBridge(httpServers, { maxResponseBytes });
+    routes.push({ bridge: httpBridge, owns: httpServers.map((s) => s.name) });
+    log.info(
+      {
+        serverCount: httpServers.length,
+        servers: httpServers.map((s) => ({ name: s.name, url: s.url })),
+        maxResponseBytes,
+      },
+      "HTTP bridge created"
+    );
+  }
+  bridge = routes.length === 1 ? routes[0]!.bridge : createCompositeTransport(routes);
 }
 
 const port = parseInt(process.env.MCP_PROXY_PORT ?? "18923", 10);
