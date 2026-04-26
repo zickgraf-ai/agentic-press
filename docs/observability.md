@@ -14,8 +14,8 @@ See also: [`./architecture.md`](./architecture.md), [`./security.md`](./security
 | Logging  | pino JSON on stdout   | Implemented            | Always on; level via `LOG_LEVEL`                |
 | Audit    | NDJSON on stdout      | Implemented            | Always on (one line per tool call)              |
 | Tracing  | Langfuse SDK (HTTPS)  | Implemented            | `LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY`   |
-| Metrics  | Prometheus `/metrics` | Planned (#10)          | `METRICS_PORT` (handler stubs throw today)      |
-| Dashboards | Grafana / Loki      | Planned (#10)          | No Alloy config shipped yet                     |
+| Metrics  | Prometheus `/metrics` | Implemented            | `METRICS_PORT` (binds to `127.0.0.1` by default; override with `METRICS_BIND`) |
+| Dashboards | Grafana / Loki      | Partial                | Metrics scrape ready; no Alloy config shipped yet |
 
 ## Logging
 
@@ -133,34 +133,45 @@ the tracer's error-isolation behaviour. `tests/server-langfuse.test.ts`
 covers the server-side integration — every terminal branch emits exactly
 one trace with the expected outcome.
 
-## Metrics (Planned, #10)
+## Metrics (Prometheus)
 
-`src/observability/metrics.ts` contains signature stubs only — every exported
-function throws `Not implemented`. There are no metrics tests, and no Alloy
-or Prometheus config ships in the repo. `ARCHITECTURE.md` keeps metrics in
-the v0.4.0 phase.
+`src/observability/metrics.ts` exposes a `MetricsRecorder` interface plus a
+`createMetricsServer` helper. Like Langfuse, metrics are strictly opt-in:
+when `METRICS_PORT` is unset the proxy returns a frozen no-op recorder and
+never imports `prom-client`. When set, a separate Express server on the
+given port serves `GET /metrics` in Prometheus exposition format. The MCP
+proxy's `audit()` function calls `safeRecord(entry)` at every terminal
+pipeline outcome (allowed, blocked, flagged, error).
 
-### Planned shape
+### Metric shape
 
-The stub signatures imply the following once implemented:
+| Metric                                  | Type      | Labels                 | Source call            |
+|-----------------------------------------|-----------|------------------------|------------------------|
+| `mcp_proxy_requests_total`              | counter   | `tool`, `status`       | `recordRequest`        |
+| `mcp_proxy_request_duration_seconds`    | histogram | `tool`, `status`       | `recordRequest`        |
+| `mcp_proxy_injection_flags_total`       | counter   | `pattern`              | `recordInjectionFlag`  |
+| `mcp_proxy_blocked_total`               | counter   | `reason`               | `recordBlockedRequest` |
 
-| Metric                       | Type      | Labels                 | Source call         |
-|------------------------------|-----------|------------------------|---------------------|
-| `mcp_proxy_requests_total`   | counter   | `tool`, `status`       | `recordRequest`     |
-| `mcp_proxy_request_duration` | histogram | `tool`, `status`       | `recordRequest`     |
-| `mcp_proxy_injection_flags_total` | counter | `pattern`            | `recordInjectionFlag` |
-| `mcp_proxy_blocked_total`    | counter   | `reason`               | `recordBlockedRequest` |
+Block reasons are one of `allowlist`, `path_guard`, `no_route`, `unknown`.
+Default Node.js process metrics (cpu, event loop lag, gc, heap) are also
+emitted via `prom-client`'s `collectDefaultMetrics`.
 
-Labels and exact metric names are not frozen — they will be defined when
-#10 lands. Expect a GET `/metrics` endpoint on a separate port
-(`METRICS_PORT`, default 9090 per the observability skill) so the audit
-port (`/mcp`) is never mixed with scrape traffic.
+### Vendor portability
 
-## Grafana / Loki (Planned, #10)
+Prometheus exposition is the de facto standard wire format for metrics.
+Datadog (Datadog Agent's [OpenMetrics check](https://docs.datadoghq.com/integrations/openmetrics/)),
+Azure Monitor (Managed Service for Prometheus), New Relic, Honeycomb, and
+Splunk all scrape Prometheus endpoints natively. Pointing them at
+`http://<proxy>:9090/metrics` is a config change in the scrape agent, not
+in agentic-press code. Push-based emission (StatsD, Datadog API, AppInsights
+TrackMetric) would require a separate exporter — file an issue if needed.
 
-No Alloy or scrape config is checked in today. When added, it should live
-under `observability/` at the repo root (or a similarly-scoped top-level
-directory — not inside `src/`). The target topology:
+## Grafana / Loki (Alloy config not yet shipped)
+
+The metrics endpoint is scrape-ready, but no Alloy or scrape config is
+checked in yet. When added, it should live under `observability/` at the
+repo root (or a similarly-scoped top-level directory — not inside `src/`).
+The target topology:
 
 - pino JSON stdout to Loki via Alloy's `loki.source.file` or the container
   stdout driver

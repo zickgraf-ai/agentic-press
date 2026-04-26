@@ -2,8 +2,14 @@ import { createProxyServer, type ProxyServerConfig } from "./mcp-proxy/server.js
 import { createStdioBridge, type StdioBridge } from "./mcp-proxy/stdio-bridge.js";
 import { parseLogLevel } from "./types.js";
 import { childLogger } from "./logger.js";
-import { loadLangfuseConfig } from "./observability/config.js";
+import { loadLangfuseConfig, loadMetricsConfig } from "./observability/config.js";
 import { createTracer, createNoopTracer, type Tracer } from "./observability/langfuse.js";
+import {
+  createMetricsRecorder,
+  createMetricsServer,
+  createNoopRecorder,
+  type MetricsRecorder,
+} from "./observability/metrics.js";
 import { loadDashboardConfig } from "./dashboard/config.js";
 import { createNoopAdapter, createMissionControlAdapter } from "./dashboard/adapter.js";
 import { createNoopEventBridge, createEventBridge, type EventBridge } from "./dashboard/event-bridge.js";
@@ -65,6 +71,37 @@ try {
   tracer = createNoopTracer();
 }
 
+// Metrics (Prometheus) — same pattern: opt-in via METRICS_PORT, no-op when
+// disabled, startup never fails. Metrics expose on a separate Express server
+// (typically port 9090) so the scrape surface is isolated from MCP traffic.
+const metricsConfig = loadMetricsConfig(process.env);
+let recorder: MetricsRecorder;
+let metricsHttpServer: import("node:http").Server | undefined;
+try {
+  recorder = await createMetricsRecorder(metricsConfig);
+  if (metricsConfig.enabled) {
+    const metricsApp = createMetricsServer(recorder);
+    // Default 127.0.0.1 — process metrics (heap, gc, cpu) are sensitive and
+    // shouldn't be exposed on every interface by default. Operators who need
+    // network-wide scrape (Grafana Alloy in another container) override with
+    // METRICS_BIND=0.0.0.0.
+    const metricsBind = process.env.METRICS_BIND?.trim() || "127.0.0.1";
+    metricsHttpServer = metricsApp.listen(metricsConfig.port, metricsBind, () => {
+      log.info({ port: metricsConfig.port, bind: metricsBind }, "Prometheus metrics endpoint listening on /metrics");
+    });
+    // listen() emits async error events (EADDRINUSE, EACCES) that escape the
+    // surrounding try/catch. Without this handler the whole process crashes —
+    // breaking the "observability must never break the request path" invariant.
+    metricsHttpServer.on("error", (err) => {
+      log.warn({ err, port: metricsConfig.port }, "Metrics HTTP server failed to bind — metrics disabled, proxy continues");
+      metricsHttpServer = undefined;
+    });
+  }
+} catch (err) {
+  log.warn({ err }, "createMetricsRecorder failed at startup — falling back to no-op recorder");
+  recorder = createNoopRecorder();
+}
+
 // Dashboard (Mission Control) — same pattern as Langfuse: opt-in, no-op when
 // not configured, startup must never fail because of the dashboard.
 const dashboardConfig = loadDashboardConfig(process.env);
@@ -90,6 +127,7 @@ const config: ProxyServerConfig = {
   serverRoutes,
   tracer,
   eventBridge,
+  recorder,
 };
 
 const app = createProxyServer(config);
@@ -133,6 +171,12 @@ function shutdown(signal: string) {
     if (bridge) tasks.push(bridge.shutdown());
     tasks.push(tracerShutdown);
     tasks.push(eventBridge.shutdown());
+    tasks.push(recorder.shutdown());
+    if (metricsHttpServer) {
+      tasks.push(
+        new Promise<void>((resolve) => metricsHttpServer!.close(() => resolve()))
+      );
+    }
     Promise.allSettled(tasks).then((results) => {
       for (const r of results) {
         if (r.status === "rejected") {

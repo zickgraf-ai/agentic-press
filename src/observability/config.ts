@@ -18,8 +18,27 @@ export interface ObservabilityConfig {
   readonly metrics: MetricsConfig;
 }
 
-const log = childLogger("langfuse");
+const log = childLogger("config");
 const DEFAULT_LANGFUSE_HOST = "https://cloud.langfuse.com";
+
+/**
+ * Build a MetricsConfig from an env-var record. Returns `{ enabled: false }`
+ * when `METRICS_PORT` is absent, empty, or invalid (non-numeric, out of
+ * range). Warns on invalid values so a typo is loud, never throws — startup
+ * must not fail because of observability.
+ */
+export function loadMetricsConfig(
+  env: Readonly<Record<string, string | undefined>>
+): MetricsConfig {
+  const raw = env.METRICS_PORT?.trim();
+  if (!raw) return { enabled: false };
+  const port = Number(raw);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    log.warn(`METRICS_PORT="${raw}" is not a valid TCP port (1-65535) — metrics disabled`);
+    return { enabled: false };
+  }
+  return { enabled: true, port };
+}
 
 /**
  * Build a LangfuseConfig from an env-var record. The function takes its env
