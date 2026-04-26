@@ -429,7 +429,10 @@ export function createProxyServer(config: ProxyServerConfig): Express {
           const rawMessage = err instanceof Error ? err.message : String(err);
           reqLog.error({ server: serverName, error: rawMessage }, "Bridge call failed");
           try {
-            audit(tool, toolArgs, "error", [], rawMessage);
+            // direction="response" — the request passed all filters and was
+            // forwarded upstream, so the failure is on the response side.
+            // Operators filtering by direction === "response" rely on this.
+            audit(tool, toolArgs, "error", [], rawMessage, "response");
           } catch (auditErr) {
             reqLog.error({ err: auditErr }, "Audit logging failed");
           }
