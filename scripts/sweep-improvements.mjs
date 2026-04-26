@@ -1,0 +1,96 @@
+#!/usr/bin/env node
+/**
+ * Self-improvement sweep — issue #20.
+ *
+ * Reads NDJSON audit log lines from a file (or stdin), analyzes them for
+ * patterns that warrant human review, and writes new markdown files to
+ * `.improvements/`. Idempotent — re-running on the same day with the same
+ * audit log is a no-op.
+ *
+ * Usage:
+ *   ./scripts/sweep-improvements.mjs [--input <audit.ndjson>] [--dir <improvements-dir>] [--max <N>]
+ *   cat audit.ndjson | ./scripts/sweep-improvements.mjs
+ *
+ * Defaults:
+ *   --input    stdin
+ *   --dir      .improvements
+ *   --max      3   (hard cap on suggestions written per run; bail-out so a
+ *                   bad trigger can't flood the directory)
+ *
+ * Security: this script writes files to the repo. It does not commit, push,
+ * or modify any other files. Output is reviewed by the human before any
+ * effect propagates further.
+ */
+
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
+
+// Resolve compiled detector/writer from dist if running compiled, else from
+// tsx via npm script. We assume `npm run sweep-improvements` invokes via tsx.
+const { detectImprovements } = await import("../src/improvements/detector.ts");
+const { writeSuggestion, isDuplicate, generateSuggestionId } = await import(
+  "../src/improvements/writer.ts"
+);
+
+const args = process.argv.slice(2);
+const opts = {
+  input: argValue("--input"),
+  dir: argValue("--dir") ?? ".improvements",
+  max: parseInt(argValue("--max") ?? "3", 10),
+};
+
+function argValue(name) {
+  const idx = args.indexOf(name);
+  return idx >= 0 && idx + 1 < args.length ? args[idx + 1] : undefined;
+}
+
+function readInput() {
+  if (opts.input) return readFileSync(resolve(opts.input), "utf8");
+  // stdin
+  return readFileSync(0, "utf8");
+}
+
+function parseEntries(text) {
+  const entries = [];
+  for (const line of text.split("\n")) {
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    try {
+      entries.push(JSON.parse(trimmed));
+    } catch {
+      // skip malformed lines — pino diagnostics may interleave with audit
+      // entries on the same stdout stream
+    }
+  }
+  // Filter to actual audit entries (have status field)
+  return entries.filter((e) => e && typeof e === "object" && "status" in e && "tool" in e);
+}
+
+const text = readInput();
+const entries = parseEntries(text);
+console.log(`[sweep] read ${entries.length} audit entries`);
+
+const suggestions = detectImprovements(entries);
+console.log(`[sweep] detected ${suggestions.length} candidate suggestions`);
+
+const dir = resolve(opts.dir);
+const now = new Date();
+let written = 0;
+let skipped = 0;
+
+for (const s of suggestions) {
+  if (written >= opts.max) {
+    console.log(`[sweep] reached --max=${opts.max} cap, stopping`);
+    break;
+  }
+  const id = generateSuggestionId(s, now);
+  if (isDuplicate(dir, id)) {
+    skipped++;
+    continue;
+  }
+  writeSuggestion(dir, s, now);
+  console.log(`[sweep] wrote ${id}.md  (${s.category}, ${s.confidence})`);
+  written++;
+}
+
+console.log(`[sweep] done — wrote ${written}, skipped ${skipped} (duplicates)`);
