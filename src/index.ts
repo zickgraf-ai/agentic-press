@@ -7,7 +7,12 @@ import { createTracer, createNoopTracer, type Tracer } from "./observability/lan
 import { loadDashboardConfig } from "./dashboard/config.js";
 import { createNoopAdapter, createMissionControlAdapter } from "./dashboard/adapter.js";
 import { createNoopEventBridge, createEventBridge, type EventBridge } from "./dashboard/event-bridge.js";
-import { parseServerDefs, parseServerRoutes, validateServerConfig } from "./server-config.js";
+import {
+  parseServerDefs,
+  parseServerRoutes,
+  validateServerConfig,
+  parseMaxResponseBytes,
+} from "./server-config.js";
 
 const log = childLogger("main");
 
@@ -17,9 +22,22 @@ const serverRoutes = parseServerRoutes(process.env.SERVER_ROUTES);
 validateServerConfig(serverDefs, serverRoutes);
 let bridge: StdioBridge | undefined;
 
+// MAX_RESPONSE_BYTES caps the size of any single upstream MCP response line
+// at the stdio-bridge read layer. 0 disables the cap. Parser is fail-loud on
+// invalid input — silently falling back to the default would mask a typo in
+// env config and re-expose the OOM surface this guard exists to close.
+const maxResponseBytes = parseMaxResponseBytes(process.env.MAX_RESPONSE_BYTES);
+
 if (serverDefs.length > 0) {
-  bridge = createStdioBridge(serverDefs, { logLevel });
-  log.info({ serverCount: serverDefs.length, servers: serverDefs.map((s) => s.name) }, "Stdio bridge created");
+  bridge = createStdioBridge(serverDefs, { logLevel, maxResponseBytes });
+  log.info(
+    {
+      serverCount: serverDefs.length,
+      servers: serverDefs.map((s) => s.name),
+      maxResponseBytes,
+    },
+    "Stdio bridge created"
+  );
 }
 
 const port = parseInt(process.env.MCP_PROXY_PORT ?? "18923", 10);

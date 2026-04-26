@@ -4,6 +4,40 @@ import { childLogger } from "../logger.js";
 
 const log = childLogger("stdio-bridge");
 
+/**
+ * Default upper bound on the byte length of a single JSON-RPC response line
+ * read from a child server's stdout. Configurable via the `maxResponseBytes`
+ * option / `MAX_RESPONSE_BYTES` env var. 10 MiB is a deliberate compromise:
+ * large enough that legitimate file-content responses fit comfortably, small
+ * enough that a hostile or runaway upstream cannot quietly OOM the proxy
+ * through unbounded buffering.
+ */
+export const DEFAULT_MAX_RESPONSE_BYTES = 10 * 1024 * 1024; // 10 MiB
+
+/**
+ * Thrown when the stdio bridge rejects a response because the byte length of
+ * the response line exceeds `maxResponseBytes`. The check runs at the read
+ * layer, before JSON parsing, so the offending payload is never fully
+ * buffered. Exposed so the server layer can pattern-match on the error type
+ * (rather than string-matching on a message) and translate it into a
+ * sanitizer-style JSON-RPC -32001 reply.
+ */
+export class ResponseSizeExceededError extends Error {
+  readonly serverName: string;
+  readonly limitBytes: number;
+  readonly observedBytes: number;
+  constructor(serverName: string, limitBytes: number, observedBytes: number) {
+    super(
+      `Server "${serverName}" response exceeded size cap ` +
+        `(limit=${limitBytes} bytes, observed≥${observedBytes} bytes)`
+    );
+    this.name = "ResponseSizeExceededError";
+    this.serverName = serverName;
+    this.limitBytes = limitBytes;
+    this.observedBytes = observedBytes;
+  }
+}
+
 export interface McpServerDef {
   name: string;
   command: string;
@@ -34,6 +68,15 @@ export interface StdioBridgeOptions {
    * child before giving up and logging a leak. Default: 2000.
    */
   readonly shutdownHardCeilingMs?: number;
+  /**
+   * Hard cap on the byte size of a single JSON-RPC line read from a child
+   * server's stdout. Enforced at the read layer — once the buffered bytes for
+   * one line exceed this, the in-flight request is rejected with
+   * ResponseSizeExceededError before JSON parsing runs, so an unbounded
+   * upstream response cannot OOM the proxy. Set to 0 to disable.
+   * Default: DEFAULT_MAX_RESPONSE_BYTES (10 MiB).
+   */
+  readonly maxResponseBytes?: number;
 }
 
 export interface StdioBridge {
@@ -65,6 +108,12 @@ interface ManagedProcess {
   // Set when fail-fast triggered: the spawn is permanently broken and should
   // never be reused. Subsequent call() attempts will reject synchronously.
   brokenReason: string | null;
+  // Set immediately after a mid-flight cap rejection. Bytes flowing in until
+  // the next "\n" are part of the SAME oversized line that already cost us
+  // one rejection — discarding them prevents a second innocent caller from
+  // being rejected by check #2 when the orphan tail finally arrives.
+  // Strictly bounds rejections to one per oversized line.
+  discardingUntilNewline: boolean;
 }
 
 function rejectAllPending(managed: ManagedProcess, error: Error): void {
@@ -73,6 +122,26 @@ function rejectAllPending(managed: ManagedProcess, error: Error): void {
     handler.reject(error);
   }
   managed.pending.clear();
+}
+
+/**
+ * Reject the oldest pending call (FIFO) with the given error. Used by the
+ * response-size cap path: when an oversized response arrives we can't parse
+ * the line to recover the request id (parsing it is exactly what we are
+ * trying to avoid), so we reject the earliest in-flight call. MCP/stdio
+ * upstreams answer requests in submission order, so the oversized line almost
+ * always corresponds to the oldest pending entry. The fallback hazard — an
+ * upstream emitting an oversized notification (no `id`) — is the same hazard
+ * the bridge already accepts on any malformed line and is bounded to one
+ * incorrect rejection per oversized event.
+ */
+function rejectOldestPending(managed: ManagedProcess, error: Error): void {
+  const first = managed.pending.entries().next();
+  if (first.done) return;
+  const [id, handler] = first.value;
+  clearTimeout(handler.timeout);
+  managed.pending.delete(id);
+  handler.reject(error);
 }
 
 /**
@@ -134,7 +203,12 @@ function handleNonJsonLine(
   }
 }
 
-function spawnServer(def: McpServerDef, logLevel: LogLevel, failFastNonJsonLines: number): ManagedProcess {
+function spawnServer(
+  def: McpServerDef,
+  logLevel: LogLevel,
+  failFastNonJsonLines: number,
+  maxResponseBytes: number
+): ManagedProcess {
   const proc = spawn(def.command, def.args, {
     stdio: ["pipe", "pipe", "inherit"], // stderr → inherit, not piped (#H-1)
     env: { ...process.env, ...def.env },
@@ -150,6 +224,7 @@ function spawnServer(def: McpServerDef, logLevel: LogLevel, failFastNonJsonLines
     jsonLinesSeen: 0,
     warnedAboutNonJson: false,
     brokenReason: null,
+    discardingUntilNewline: false,
   };
 
   // Handle spawn errors (ENOENT, permission denied) (#C-3)
@@ -167,12 +242,62 @@ function spawnServer(def: McpServerDef, logLevel: LogLevel, failFastNonJsonLines
   if (proc.stdout) {
     proc.stdout.setEncoding("utf8");
     proc.stdout.on("data", (chunk: string) => {
-      managed.buffer += chunk;
+      // If we are still draining the orphan tail of a previously over-cap
+      // line, drop bytes until we hit the next newline. This bounds rejections
+      // to ONE per oversized line — without it, a chunk shaped like
+      //   "<oversized-tail>\n<small valid sibling>\n"
+      // would re-trip cap check #2 against the orphan and reject an innocent
+      // pending call. After consuming through the newline we resume normal
+      // processing on whatever follows.
+      let working = chunk;
+      if (managed.discardingUntilNewline) {
+        const nl = working.indexOf("\n");
+        if (nl === -1) {
+          // Whole chunk is still part of the oversized line. Drop and wait.
+          return;
+        }
+        working = working.slice(nl + 1);
+        managed.discardingUntilNewline = false;
+      }
+
+      managed.buffer += working;
+
       const lines = managed.buffer.split("\n");
       managed.buffer = lines.pop() || "";
 
+      // Cap check #2 (per complete line): a line whose byte length exceeds
+      // the cap is rejected before JSON.parse runs — JSON.parse on a 1 GB
+      // string is exactly the OOM we are guarding against. A line of
+      // length == cap is allowed (boundary inclusive).
+      //
+      // Process complete lines FIRST. Sibling complete lines that arrived in
+      // the same chunk carry valid ids and must be delivered to their callers
+      // even if the trailing partial buffer trips the mid-flight cap below —
+      // dropping them silently was the original bug (oversized line co-located
+      // with a small valid response would time out the innocent caller at 30s).
+      //
+      // Use Buffer.byteLength(..., "utf8") rather than .length: the cap is
+      // specified in BYTES and the wire protocol is UTF-8. JS strings are
+      // UTF-16 internally — `s.length` counts UTF-16 code units, not bytes,
+      // so multi-byte chars (e.g. emoji, "𝄞") would be undercounted by length
+      // and overcounted by code-unit measurement of the source string. Always
+      // measure with Buffer.byteLength when comparing against a byte cap.
       for (const line of lines) {
         if (!line.trim()) continue;
+        if (
+          maxResponseBytes > 0 &&
+          Buffer.byteLength(line, "utf8") > maxResponseBytes
+        ) {
+          rejectOldestPending(
+            managed,
+            new ResponseSizeExceededError(
+              def.name,
+              maxResponseBytes,
+              Buffer.byteLength(line, "utf8")
+            )
+          );
+          continue; // drop the oversized line, keep processing siblings
+        }
         // Only catch JSON parse errors — post-parse logic is outside try (#C-1)
         let msg: Record<string, unknown>;
         try {
@@ -196,6 +321,27 @@ function spawnServer(def: McpServerDef, logLevel: LogLevel, failFastNonJsonLines
           }
         }
       }
+
+      // Cap check #1 (mid-flight): the trailing partial line in
+      // managed.buffer carries no newline yet. If its byte length already
+      // exceeds the cap we are watching a hostile upstream stream an
+      // unbounded line — reject the oldest pending call and discard further
+      // bytes until the next newline so the orphan tail doesn't trigger a
+      // second (innocent) rejection on the next data event.
+      //
+      // This MUST run after the complete-line loop above (see C1 above).
+      if (
+        maxResponseBytes > 0 &&
+        Buffer.byteLength(managed.buffer, "utf8") > maxResponseBytes
+      ) {
+        const observed = Buffer.byteLength(managed.buffer, "utf8");
+        managed.buffer = "";
+        managed.discardingUntilNewline = true;
+        rejectOldestPending(
+          managed,
+          new ResponseSizeExceededError(def.name, maxResponseBytes, observed)
+        );
+      }
     });
   }
 
@@ -216,6 +362,7 @@ export function createStdioBridge(servers: McpServerDef[], options: StdioBridgeO
   const failFastNonJsonLines = options.failFastNonJsonLines ?? 5;
   const gracePeriodMs = options.shutdownGracePeriodMs ?? 5000;
   const hardCeilingMs = options.shutdownHardCeilingMs ?? 2000;
+  const maxResponseBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
   const processes = new Map<string, ManagedProcess>();
   const definitions = new Map<string, McpServerDef>();
 
@@ -241,7 +388,7 @@ export function createStdioBridge(servers: McpServerDef[], options: StdioBridgeO
     const def = definitions.get(name);
     if (!def) throw new Error(`Server "${name}" not found or not configured`);
 
-    const managed = spawnServer(def, logLevel, failFastNonJsonLines);
+    const managed = spawnServer(def, logLevel, failFastNonJsonLines, maxResponseBytes);
     processes.set(name, managed);
     return managed;
   }

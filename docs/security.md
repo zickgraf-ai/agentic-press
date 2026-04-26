@@ -23,6 +23,7 @@ Both the agent and upstream MCP servers are treated as untrusted input sources. 
 | Tool-result turn boundary forgery (fake `<|system|>`, `</tool_result>`) | `system_override` category in injection patterns | `src/security/injection-patterns.ts` |
 | Zero-width unicode smuggling of hidden instructions | `unicode_smuggling` category; stripped globally in `strip` mode | `src/security/injection-patterns.ts`, `src/mcp-proxy/sanitizer.ts` |
 | Base64-encoded payloads carrying injection strings | `encoded_payload` category — decode, round-trip verify, match against dangerous content | `src/security/injection-patterns.ts` |
+| Denial-of-service via unbounded upstream response (memory exhaustion) | Stdio bridge rejects any single response line that exceeds `MAX_RESPONSE_BYTES` (default 10 MiB) at the read layer, before JSON parsing. The in-flight call is rejected with the response sanitizer's generic JSON-RPC `-32001` reply. Envelope is byte-identical between size-cap and content-sanitizer rejections, but **wall-clock latency may differ and is not constant-time** — size-cap fires mid-stream while the content sanitizer fires after a full parse, so a careful attacker can still distinguish the two via timing. Treat as defense-in-depth, not size-probe-proof. Audit entry carries `direction=response, status=blocked, errorMessage="response size cap exceeded"`. Set `MAX_RESPONSE_BYTES=0` to disable. | `src/mcp-proxy/stdio-bridge.ts`, `src/mcp-proxy/server.ts` |
 
 ## Enforcement Points
 
@@ -90,7 +91,6 @@ Every MCP request and every upstream response passes through `src/mcp-proxy/logg
 
 - **Semantic prompt injection in clean English.** Pattern matching is a coarse first layer; the agent's own instruction-following discipline is the second. High-assurance deployments should pair `block` mode with output validation and human-in-the-loop confirmation.
 - **Covert data in image/audio binary fields.** Response sanitization skips `data` and `blob` inside image/audio blocks because they are opaque payloads. If the agent decodes and renders them, that is a separate trust boundary from this proxy.
-- **Denial-of-service by response size.** The proxy does not cap upstream response size today — a hostile MCP server can OOM the proxy with a large result. Tracked in [#39](https://github.com/zickgraf-ai/agentic-press/issues/39).
 - **Compromise of the proxy process itself.** The proxy is trusted code; there is no in-process sandboxing of its own logic.
 
 ## Operator Responsibilities

@@ -1,7 +1,36 @@
 import type { McpServerDef } from "./mcp-proxy/stdio-bridge.js";
+import { DEFAULT_MAX_RESPONSE_BYTES } from "./mcp-proxy/stdio-bridge.js";
 import { childLogger } from "./logger.js";
 
 const log = childLogger("server-config");
+
+/**
+ * Parse the MAX_RESPONSE_BYTES env var into a non-negative integer cap on
+ * upstream response line size. `undefined` (var unset) returns the default
+ * cap. Any non-canonical numeric form throws — silently coercing "1e7",
+ * "+10", "010", "0x10", or "100abc" into a number would mask config typos
+ * and quietly re-expose the OOM surface this guard exists to close.
+ *
+ * Accepted: a string of one or more decimal digits (no leading "+", no
+ * leading zeros except a bare "0", no exponent, no hex). 0 is allowed and
+ * disables the cap.
+ *
+ * @throws on any non-canonical numeric form, negative numbers, or text.
+ */
+export function parseMaxResponseBytes(raw: string | undefined): number {
+  if (raw === undefined) return DEFAULT_MAX_RESPONSE_BYTES;
+  const n = parseInt(raw, 10);
+  // Round-trip the parsed integer back to its decimal string; if the trimmed
+  // input doesn't match exactly we reject. This catches "100abc" (parseInt
+  // succeeds at 100), "1e7" (succeeds at 1), "+10" (succeeds at 10),
+  // "010" (succeeds at 10), "0x10" (succeeds at 0), and "-1" (negative).
+  if (isNaN(n) || n < 0 || String(n) !== raw.trim()) {
+    throw new Error(
+      `Invalid MAX_RESPONSE_BYTES: "${raw}" — must be a non-negative integer (0 disables)`
+    );
+  }
+  return n;
+}
 
 /**
  * Parse MCP server definitions from an env-var string.

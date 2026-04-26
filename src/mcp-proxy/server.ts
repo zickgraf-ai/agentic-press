@@ -7,7 +7,7 @@ import { checkPath } from "../security/path-guard.js";
 import { sanitize } from "./sanitizer.js";
 import { sanitizeResponse } from "./response-sanitizer.js";
 import { logAuditEntry, type AuditEntry } from "./logger.js";
-import type { StdioBridge } from "./stdio-bridge.js";
+import { ResponseSizeExceededError, type StdioBridge } from "./stdio-bridge.js";
 import {
   createNoopTracer,
   type Tracer,
@@ -56,6 +56,19 @@ function jsonRpcError(id: number | string | null, code: number, message: string)
  */
 function genericInternalError(correlationId: string): string {
   return `Internal proxy error (ref: ${correlationId})`;
+}
+
+/**
+ * Single source of truth for the client-facing response-rejection message.
+ * Used by every response-side rejection path (size cap, sanitizer flag,
+ * sanitizer-throws-during-parse) so an attacker cannot distinguish them by
+ * the message body. Centralising this is a defence-in-depth invariant:
+ * duplicating the literal across call sites means a future "improvement" to
+ * one path silently breaks the indistinguishability property the size-probe
+ * defence depends on.
+ */
+export function responseRejectMessage(correlationId: string): string {
+  return `Response blocked by response sanitizer (ref: ${correlationId})`;
 }
 
 // Recursively extract path-like strings from args (#N-1)
@@ -313,7 +326,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
               jsonRpcError(
                 requestId,
                 -32001,
-                `Response blocked by response sanitizer (ref: ${correlationId})`
+                responseRejectMessage(correlationId)
               )
             );
             return;
@@ -328,7 +341,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
               jsonRpcError(
                 requestId,
                 -32001,
-                `Response blocked by response sanitizer (ref: ${correlationId})`
+                responseRejectMessage(correlationId)
               )
             );
             return;
@@ -340,6 +353,47 @@ export function createProxyServer(config: ProxyServerConfig): Express {
         })
         .catch((err) => {
           if (res.headersSent) return;
+
+          // Response-size cap rejection. We deliberately reuse the response
+          // sanitizer's client-facing error message so an attacker cannot
+          // distinguish a size-cap rejection from a content-pattern rejection
+          // (size-probe defence — leaking a distinct -32001 + "size" signal
+          // would let an adversary binary-search the cap value). Operator
+          // visibility comes through the audit entry's structured
+          // errorMessage field instead.
+          if (err instanceof ResponseSizeExceededError) {
+            try {
+              audit(
+                tool,
+                toolArgs,
+                "blocked",
+                [],
+                "response size cap exceeded",
+                "response"
+              );
+            } catch (auditErr) {
+              reqLog.error({ err: auditErr }, "Audit logging failed");
+            }
+            reqLog.error(
+              {
+                server: serverName,
+                limitBytes: err.limitBytes,
+                observedBytes: err.observedBytes,
+              },
+              "Upstream response exceeded size cap"
+            );
+            safeSpan({ tool, status: "blocked", durationMs: Date.now() - start });
+            safeEnd({ outcome: "blocked" });
+            res.json(
+              jsonRpcError(
+                requestId,
+                -32001,
+                responseRejectMessage(correlationId)
+              )
+            );
+            return;
+          }
+
           const rawMessage = err instanceof Error ? err.message : String(err);
           reqLog.error({ server: serverName, error: rawMessage }, "Bridge call failed");
           try {
