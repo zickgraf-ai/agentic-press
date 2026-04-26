@@ -24,6 +24,20 @@ import { createProxyServer, type ProxyServerConfig } from "../src/mcp-proxy/serv
 import { ResponseSizeExceededError, type StdioBridge } from "../src/mcp-proxy/stdio-bridge.js";
 import type { Tracer, ActiveTrace } from "../src/observability/langfuse.js";
 
+// Spy on the response sanitizer module so individual tests can swap in
+// (a) a result that returns flags, or (b) a function that throws — both
+// of which exercise different branches of the same indistinguishability
+// invariant the size-cap rejection rides on.
+const responseSanitizerSpy = vi.hoisted(() => ({
+  impl: ((value: unknown) => ({
+    flags: [] as Array<{ pattern: string }>,
+    sanitized: value,
+  })) as (value: unknown) => { flags: Array<{ pattern: string }>; sanitized: unknown },
+}));
+vi.mock("../src/mcp-proxy/response-sanitizer.js", () => ({
+  sanitizeResponse: (value: unknown) => responseSanitizerSpy.impl(value),
+}));
+
 interface SpyTracer extends Tracer {
   startTrace: ReturnType<typeof vi.fn>;
   span: ReturnType<typeof vi.fn>;
@@ -154,5 +168,88 @@ describe("MCP proxy — response size cap mapping", () => {
     expect(last[0].status).toBe("blocked");
     expect(tracer.end).toHaveBeenCalled();
     expect(tracer.end.mock.calls.at(-1)![0].outcome).toBe("blocked");
+  });
+});
+
+/**
+ * I5: the client-facing reject message MUST be byte-identical across all
+ * response-side rejection paths (size-cap, sanitizer-flag,
+ * sanitizer-throws). Duplicating the literal across 3 sites was the
+ * pre-fix state — easy to "improve" one path and silently break the
+ * indistinguishability invariant the size-probe defence rides on.
+ */
+describe("MCP proxy — reject-message indistinguishability invariant", () => {
+  // Bridge that resolves with whatever data the test wants the response
+  // sanitizer to evaluate. Used to drive the sanitizer-flag and
+  // sanitizer-throws paths.
+  function makeResolvingBridge(payload: unknown): StdioBridge {
+    return {
+      call: vi.fn(async () => payload),
+      shutdown: vi.fn(async () => {}),
+    } as unknown as StdioBridge;
+  }
+
+  /** Strip the per-request correlation id so messages from different
+   * requests can be compared as if they came from the same request. */
+  function stripRef(msg: string): string {
+    return msg.replace(/\(ref: [0-9a-f]{16}\)/, "(ref: <ID>)");
+  }
+
+  async function getRejectMessage(
+    config: ProxyServerConfig,
+    id: number
+  ): Promise<string> {
+    const { server, url } = await startServer(config);
+    try {
+      const res = await mcpCall(url, id, "Read", { path: "./safe.ts" });
+      const body = await res.json();
+      expect(body.error?.code).toBe(-32001);
+      return body.error.message as string;
+    } finally {
+      await closeServer(server);
+    }
+  }
+
+  beforeEach(() => {
+    // Default sanitizer: passthrough (no flags). Each test overrides as needed.
+    responseSanitizerSpy.impl = (value) => ({ flags: [], sanitized: value });
+  });
+
+  it("size-cap, sanitizer-flag, and sanitizer-throws produce identical message bodies", async () => {
+    // Path 1: size-cap rejection
+    const sizeCapMsg = await getRejectMessage(
+      makeConfig({ bridge: makeOversizedBridge() }),
+      101
+    );
+
+    // Path 2: sanitizer returns a flag
+    responseSanitizerSpy.impl = (value) => ({
+      flags: [{ pattern: "test_pattern" } as { pattern: string }],
+      sanitized: value,
+    });
+    const sanitizerFlagMsg = await getRejectMessage(
+      makeConfig({ bridge: makeResolvingBridge({ ok: true }) }),
+      102
+    );
+
+    // Path 3: sanitizer throws (fail-closed branch)
+    responseSanitizerSpy.impl = () => {
+      throw new Error("sanitizer exploded");
+    };
+    const sanitizerThrowMsg = await getRejectMessage(
+      makeConfig({ bridge: makeResolvingBridge({ ok: true }) }),
+      103
+    );
+
+    // All three messages must share the SAME shape after stripping the ref.
+    // If a future "improvement" changes one literal, this assert is the
+    // tripwire.
+    const expected = "Response blocked by response sanitizer (ref: <ID>)";
+    expect(stripRef(sizeCapMsg)).toBe(expected);
+    expect(stripRef(sanitizerFlagMsg)).toBe(expected);
+    expect(stripRef(sanitizerThrowMsg)).toBe(expected);
+    // Direct equality after strip — guards against subtle whitespace drift.
+    expect(stripRef(sizeCapMsg)).toBe(stripRef(sanitizerFlagMsg));
+    expect(stripRef(sanitizerFlagMsg)).toBe(stripRef(sanitizerThrowMsg));
   });
 });

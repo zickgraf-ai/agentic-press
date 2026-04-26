@@ -58,6 +58,19 @@ function genericInternalError(correlationId: string): string {
   return `Internal proxy error (ref: ${correlationId})`;
 }
 
+/**
+ * Single source of truth for the client-facing response-rejection message.
+ * Used by every response-side rejection path (size cap, sanitizer flag,
+ * sanitizer-throws-during-parse) so an attacker cannot distinguish them by
+ * the message body. Centralising this is a defence-in-depth invariant:
+ * duplicating the literal across call sites means a future "improvement" to
+ * one path silently breaks the indistinguishability property the size-probe
+ * defence depends on.
+ */
+export function responseRejectMessage(correlationId: string): string {
+  return `Response blocked by response sanitizer (ref: ${correlationId})`;
+}
+
 // Recursively extract path-like strings from args (#N-1)
 // Path-like: starts with /, ./, ../, ~, or a drive letter (C:)
 // Recurses into nested objects and arrays
@@ -313,7 +326,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
               jsonRpcError(
                 requestId,
                 -32001,
-                `Response blocked by response sanitizer (ref: ${correlationId})`
+                responseRejectMessage(correlationId)
               )
             );
             return;
@@ -328,7 +341,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
               jsonRpcError(
                 requestId,
                 -32001,
-                `Response blocked by response sanitizer (ref: ${correlationId})`
+                responseRejectMessage(correlationId)
               )
             );
             return;
@@ -375,7 +388,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
               jsonRpcError(
                 requestId,
                 -32001,
-                `Response blocked by response sanitizer (ref: ${correlationId})`
+                responseRejectMessage(correlationId)
               )
             );
             return;

@@ -108,6 +108,12 @@ interface ManagedProcess {
   // Set when fail-fast triggered: the spawn is permanently broken and should
   // never be reused. Subsequent call() attempts will reject synchronously.
   brokenReason: string | null;
+  // Set immediately after a mid-flight cap rejection. Bytes flowing in until
+  // the next "\n" are part of the SAME oversized line that already cost us
+  // one rejection — discarding them prevents a second innocent caller from
+  // being rejected by check #2 when the orphan tail finally arrives.
+  // Strictly bounds rejections to one per oversized line.
+  discardingUntilNewline: boolean;
 }
 
 function rejectAllPending(managed: ManagedProcess, error: Error): void {
@@ -218,6 +224,7 @@ function spawnServer(
     jsonLinesSeen: 0,
     warnedAboutNonJson: false,
     brokenReason: null,
+    discardingUntilNewline: false,
   };
 
   // Handle spawn errors (ENOENT, permission denied) (#C-3)
@@ -235,38 +242,48 @@ function spawnServer(
   if (proc.stdout) {
     proc.stdout.setEncoding("utf8");
     proc.stdout.on("data", (chunk: string) => {
-      managed.buffer += chunk;
+      // If we are still draining the orphan tail of a previously over-cap
+      // line, drop bytes until we hit the next newline. This bounds rejections
+      // to ONE per oversized line — without it, a chunk shaped like
+      //   "<oversized-tail>\n<small valid sibling>\n"
+      // would re-trip cap check #2 against the orphan and reject an innocent
+      // pending call. After consuming through the newline we resume normal
+      // processing on whatever follows.
+      let working = chunk;
+      if (managed.discardingUntilNewline) {
+        const nl = working.indexOf("\n");
+        if (nl === -1) {
+          // Whole chunk is still part of the oversized line. Drop and wait.
+          return;
+        }
+        working = working.slice(nl + 1);
+        managed.discardingUntilNewline = false;
+      }
+
+      managed.buffer += working;
 
       const lines = managed.buffer.split("\n");
       managed.buffer = lines.pop() || "";
 
-      // Cap check #1 (mid-flight): the trailing partial line in
-      // managed.buffer carries no newline yet. If it already exceeds the cap
-      // we are watching a hostile upstream stream an unbounded line — reject
-      // the oldest pending call, drop the buffer, bail out before processing
-      // any preceding complete lines (those are now ambiguous w.r.t. id).
-      // Use Buffer.byteLength(..., "utf8") rather than .length because the
-      // cap is specified in bytes and the wire protocol is UTF-8 — `.length`
-      // counts UTF-16 code units which over-counts multi-byte chars.
-      if (
-        maxResponseBytes > 0 &&
-        Buffer.byteLength(managed.buffer, "utf8") > maxResponseBytes
-      ) {
-        const observed = Buffer.byteLength(managed.buffer, "utf8");
-        managed.buffer = "";
-        rejectOldestPending(
-          managed,
-          new ResponseSizeExceededError(def.name, maxResponseBytes, observed)
-        );
-        return;
-      }
-
+      // Cap check #2 (per complete line): a line whose byte length exceeds
+      // the cap is rejected before JSON.parse runs — JSON.parse on a 1 GB
+      // string is exactly the OOM we are guarding against. A line of
+      // length == cap is allowed (boundary inclusive).
+      //
+      // Process complete lines FIRST. Sibling complete lines that arrived in
+      // the same chunk carry valid ids and must be delivered to their callers
+      // even if the trailing partial buffer trips the mid-flight cap below —
+      // dropping them silently was the original bug (oversized line co-located
+      // with a small valid response would time out the innocent caller at 30s).
+      //
+      // Use Buffer.byteLength(..., "utf8") rather than .length: the cap is
+      // specified in BYTES and the wire protocol is UTF-8. JS strings are
+      // UTF-16 internally — `s.length` counts UTF-16 code units, not bytes,
+      // so multi-byte chars (e.g. emoji, "𝄞") would be undercounted by length
+      // and overcounted by code-unit measurement of the source string. Always
+      // measure with Buffer.byteLength when comparing against a byte cap.
       for (const line of lines) {
         if (!line.trim()) continue;
-        // Cap check #2 (per complete line): a line whose byte length exceeds
-        // the cap is rejected before JSON.parse runs — JSON.parse on a 1 GB
-        // string is exactly the OOM we are guarding against. A line of
-        // length == cap is allowed (boundary inclusive).
         if (
           maxResponseBytes > 0 &&
           Buffer.byteLength(line, "utf8") > maxResponseBytes
@@ -303,6 +320,27 @@ function spawnServer(
             handler.resolve(msg.result);
           }
         }
+      }
+
+      // Cap check #1 (mid-flight): the trailing partial line in
+      // managed.buffer carries no newline yet. If its byte length already
+      // exceeds the cap we are watching a hostile upstream stream an
+      // unbounded line — reject the oldest pending call and discard further
+      // bytes until the next newline so the orphan tail doesn't trigger a
+      // second (innocent) rejection on the next data event.
+      //
+      // This MUST run after the complete-line loop above (see C1 above).
+      if (
+        maxResponseBytes > 0 &&
+        Buffer.byteLength(managed.buffer, "utf8") > maxResponseBytes
+      ) {
+        const observed = Buffer.byteLength(managed.buffer, "utf8");
+        managed.buffer = "";
+        managed.discardingUntilNewline = true;
+        rejectOldestPending(
+          managed,
+          new ResponseSizeExceededError(def.name, maxResponseBytes, observed)
+        );
       }
     });
   }

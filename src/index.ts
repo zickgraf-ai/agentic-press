@@ -1,9 +1,5 @@
 import { createProxyServer, type ProxyServerConfig } from "./mcp-proxy/server.js";
-import {
-  createStdioBridge,
-  DEFAULT_MAX_RESPONSE_BYTES,
-  type StdioBridge,
-} from "./mcp-proxy/stdio-bridge.js";
+import { createStdioBridge, type StdioBridge } from "./mcp-proxy/stdio-bridge.js";
 import { parseLogLevel } from "./types.js";
 import { childLogger } from "./logger.js";
 import { loadLangfuseConfig } from "./observability/config.js";
@@ -11,7 +7,12 @@ import { createTracer, createNoopTracer, type Tracer } from "./observability/lan
 import { loadDashboardConfig } from "./dashboard/config.js";
 import { createNoopAdapter, createMissionControlAdapter } from "./dashboard/adapter.js";
 import { createNoopEventBridge, createEventBridge, type EventBridge } from "./dashboard/event-bridge.js";
-import { parseServerDefs, parseServerRoutes, validateServerConfig } from "./server-config.js";
+import {
+  parseServerDefs,
+  parseServerRoutes,
+  validateServerConfig,
+  parseMaxResponseBytes,
+} from "./server-config.js";
 
 const log = childLogger("main");
 
@@ -22,22 +23,10 @@ validateServerConfig(serverDefs, serverRoutes);
 let bridge: StdioBridge | undefined;
 
 // MAX_RESPONSE_BYTES caps the size of any single upstream MCP response line
-// at the stdio-bridge read layer. 0 disables the cap. Fail-loud on invalid
-// input — silently falling back to the default would mask a typo in env
-// config and re-expose the OOM surface this guard exists to close.
-const maxResponseBytesEnv = process.env.MAX_RESPONSE_BYTES;
-const maxResponseBytes =
-  maxResponseBytesEnv === undefined
-    ? DEFAULT_MAX_RESPONSE_BYTES
-    : (() => {
-        const n = parseInt(maxResponseBytesEnv, 10);
-        if (isNaN(n) || n < 0 || String(n) !== maxResponseBytesEnv.trim()) {
-          throw new Error(
-            `Invalid MAX_RESPONSE_BYTES: "${maxResponseBytesEnv}" — must be a non-negative integer (0 disables)`
-          );
-        }
-        return n;
-      })();
+// at the stdio-bridge read layer. 0 disables the cap. Parser is fail-loud on
+// invalid input — silently falling back to the default would mask a typo in
+// env config and re-expose the OOM surface this guard exists to close.
+const maxResponseBytes = parseMaxResponseBytes(process.env.MAX_RESPONSE_BYTES);
 
 if (serverDefs.length > 0) {
   bridge = createStdioBridge(serverDefs, { logLevel, maxResponseBytes });
