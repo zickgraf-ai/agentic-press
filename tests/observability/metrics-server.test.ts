@@ -84,3 +84,31 @@ describe("metrics HTTP server", () => {
     }
   });
 });
+
+describe("metrics HTTP server — error path", () => {
+  it("returns 500 when metricsText() rejects", async () => {
+    // A custom recorder whose metricsText throws — exercise the catch block in
+    // createMetricsServer so a registry failure doesn't surface a 200 with
+    // empty body (which would silently mask broken telemetry).
+    const recorder: MetricsRecorder = {
+      recordRequest: () => {},
+      recordInjectionFlag: () => {},
+      recordBlockedRequest: () => {},
+      metricsText: async () => { throw new Error("registry down"); },
+      shutdown: async () => {},
+    };
+    const app = createMetricsServer(recorder);
+    const server = await new Promise<Server>((resolve) => {
+      const s = app.listen(0, () => resolve(s));
+    });
+    const addr = server.address() as AddressInfo;
+    try {
+      const res = await fetch(`http://127.0.0.1:${addr.port}/metrics`);
+      expect(res.status).toBe(500);
+      const body = await res.text();
+      expect(body).toContain("metrics unavailable");
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
+  });
+});

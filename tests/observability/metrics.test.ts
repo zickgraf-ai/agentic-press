@@ -122,6 +122,19 @@ describe("createMetricsRecorder (enabled)", () => {
     expect(incCall).toBeDefined();
   });
 
+  it("recordRequest converts durationMs to seconds for the histogram observation", async () => {
+    // Prometheus convention is seconds, our internal AuditEntry is milliseconds.
+    // A regression that drops the /1000 conversion would silently report values
+    // 1000x too high — buckets would still be hit, but they'd be the wrong ones.
+    const r = await createMetricsRecorder({ enabled: true, port: 9090 });
+    r.recordRequest("Read", "allowed", 1500); // 1.5s
+    const observeCall = histogramObserve.mock.calls[0]!;
+    expect(observeCall[1]).toBeCloseTo(1.5, 6);
+    histogramObserve.mockClear();
+    r.recordRequest("Read", "allowed", 0);
+    expect(histogramObserve.mock.calls[0]![1]).toBe(0);
+  });
+
   it("recordInjectionFlag increments the injection counter with pattern label", async () => {
     const r = await createMetricsRecorder({ enabled: true, port: 9090 });
     r.recordInjectionFlag("ignore_instructions");
@@ -182,5 +195,15 @@ describe("createMetricsRecorder (enabled)", () => {
     const r = await createMetricsRecorder({ enabled: true, port: 9090 });
     await r.shutdown();
     expect(registryClear).toHaveBeenCalled();
+  });
+
+  it("shutdown swallows registry.clear errors without throwing", async () => {
+    mockLogger.warn.mockClear();
+    registryClear.mockImplementationOnce(() => {
+      throw new Error("clear boom");
+    });
+    const r = await createMetricsRecorder({ enabled: true, port: 9090 });
+    await expect(r.shutdown()).resolves.toBeUndefined();
+    expect(mockLogger.warn).toHaveBeenCalled();
   });
 });

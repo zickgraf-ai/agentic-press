@@ -81,8 +81,20 @@ try {
   recorder = await createMetricsRecorder(metricsConfig);
   if (metricsConfig.enabled) {
     const metricsApp = createMetricsServer(recorder);
-    metricsHttpServer = metricsApp.listen(metricsConfig.port, "0.0.0.0", () => {
-      log.info({ port: metricsConfig.port }, "Prometheus metrics endpoint listening on /metrics");
+    // Default 127.0.0.1 — process metrics (heap, gc, cpu) are sensitive and
+    // shouldn't be exposed on every interface by default. Operators who need
+    // network-wide scrape (Grafana Alloy in another container) override with
+    // METRICS_BIND=0.0.0.0.
+    const metricsBind = process.env.METRICS_BIND?.trim() || "127.0.0.1";
+    metricsHttpServer = metricsApp.listen(metricsConfig.port, metricsBind, () => {
+      log.info({ port: metricsConfig.port, bind: metricsBind }, "Prometheus metrics endpoint listening on /metrics");
+    });
+    // listen() emits async error events (EADDRINUSE, EACCES) that escape the
+    // surrounding try/catch. Without this handler the whole process crashes —
+    // breaking the "observability must never break the request path" invariant.
+    metricsHttpServer.on("error", (err) => {
+      log.warn({ err, port: metricsConfig.port }, "Metrics HTTP server failed to bind — metrics disabled, proxy continues");
+      metricsHttpServer = undefined;
     });
   }
 } catch (err) {

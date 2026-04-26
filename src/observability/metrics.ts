@@ -8,11 +8,15 @@ import type { Counter, Histogram, Registry } from "prom-client";
 
 const log = childLogger("metrics");
 
+/** Block reason categories — closed union so cardinality is bounded and typos fail at compile time. */
+export type BlockReason = "allowlist" | "path_guard" | "no_route" | "unknown";
+
 export interface MetricsRecorder {
   recordRequest(tool: string, status: AuditStatus, durationMs: number): void;
   recordInjectionFlag(pattern: string): void;
-  recordBlockedRequest(reason: string): void;
+  recordBlockedRequest(reason: BlockReason): void;
   metricsText(): Promise<{ contentType: string; body: string }>;
+  /** Idempotent — safe to call more than once during shutdown. */
   shutdown(): Promise<void>;
 }
 

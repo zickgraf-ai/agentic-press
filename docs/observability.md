@@ -14,8 +14,8 @@ See also: [`./architecture.md`](./architecture.md), [`./security.md`](./security
 | Logging  | pino JSON on stdout   | Implemented            | Always on; level via `LOG_LEVEL`                |
 | Audit    | NDJSON on stdout      | Implemented            | Always on (one line per tool call)              |
 | Tracing  | Langfuse SDK (HTTPS)  | Implemented            | `LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY`   |
-| Metrics  | Prometheus `/metrics` | Planned (#10)          | `METRICS_PORT` (handler stubs throw today)      |
-| Dashboards | Grafana / Loki      | Planned (#10)          | No Alloy config shipped yet                     |
+| Metrics  | Prometheus `/metrics` | Implemented            | `METRICS_PORT` (binds to `127.0.0.1` by default; override with `METRICS_BIND`) |
+| Dashboards | Grafana / Loki      | Partial                | Metrics scrape ready; no Alloy config shipped yet |
 
 ## Logging
 
@@ -166,11 +166,12 @@ Splunk all scrape Prometheus endpoints natively. Pointing them at
 in agentic-press code. Push-based emission (StatsD, Datadog API, AppInsights
 TrackMetric) would require a separate exporter — file an issue if needed.
 
-## Grafana / Loki (Planned, #10)
+## Grafana / Loki (Alloy config not yet shipped)
 
-No Alloy or scrape config is checked in today. When added, it should live
-under `observability/` at the repo root (or a similarly-scoped top-level
-directory — not inside `src/`). The target topology:
+The metrics endpoint is scrape-ready, but no Alloy or scrape config is
+checked in yet. When added, it should live under `observability/` at the
+repo root (or a similarly-scoped top-level directory — not inside `src/`).
+The target topology:
 
 - pino JSON stdout to Loki via Alloy's `loki.source.file` or the container
   stdout driver

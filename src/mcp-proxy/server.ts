@@ -16,7 +16,7 @@ import {
   type EndTraceParams,
 } from "../observability/langfuse.js";
 import { createNoopEventBridge, type EventBridge } from "../dashboard/event-bridge.js";
-import { createNoopRecorder, type MetricsRecorder } from "../observability/metrics.js";
+import { createNoopRecorder, type MetricsRecorder, type BlockReason } from "../observability/metrics.js";
 
 const log = childLogger("mcp-proxy");
 
@@ -183,18 +183,30 @@ export function createProxyServer(config: ProxyServerConfig): Express {
       }
     }
 
-    function safeRecord(entry: AuditEntry, blockReason?: string) {
+    function safeRecord(entry: AuditEntry, blockReason?: BlockReason) {
+      // Coerce tool name for blocked entries to a sentinel so an attacker
+      // submitting many distinct names cannot blow up registry cardinality.
+      // The block-reason label still distinguishes WHY it was blocked.
+      const toolLabel = entry.status === "blocked" ? "_blocked" : entry.tool;
       try {
-        recorder.recordRequest(entry.tool, entry.status, entry.durationMs ?? 0);
-        if (entry.status === "flagged") {
-          for (const f of entry.flags) {
-            recorder.recordInjectionFlag(f.pattern);
-          }
-        } else if (entry.status === "blocked") {
-          recorder.recordBlockedRequest(blockReason ?? "unknown");
-        }
+        recorder.recordRequest(toolLabel, entry.status, entry.durationMs ?? 0);
       } catch (err) {
-        reqLog.warn({ err }, "recorder method threw (ignored)");
+        reqLog.warn({ err }, "recorder.recordRequest threw (ignored)");
+      }
+      if (entry.status === "flagged") {
+        for (const f of entry.flags) {
+          try {
+            recorder.recordInjectionFlag(f.pattern);
+          } catch (err) {
+            reqLog.warn({ err }, "recorder.recordInjectionFlag threw (ignored)");
+          }
+        }
+      } else if (entry.status === "blocked") {
+        try {
+          recorder.recordBlockedRequest(blockReason ?? "unknown");
+        } catch (err) {
+          reqLog.warn({ err }, "recorder.recordBlockedRequest threw (ignored)");
+        }
       }
     }
 
@@ -205,7 +217,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
       flags: AuditEntry["flags"] = [],
       errorMessage?: string,
       direction: AuditEntry["direction"] = "request",
-      blockReason?: string
+      blockReason?: BlockReason
     ) {
       const entry: AuditEntry = {
         timestamp: new Date().toISOString(),

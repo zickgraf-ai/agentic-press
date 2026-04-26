@@ -114,12 +114,14 @@ describe("MCP proxy MetricsRecorder wire-up", () => {
     expect(typeof lastCall[2]).toBe("number");
   });
 
-  it("recordRequest + recordBlockedRequest are called for an allowlist-blocked call", async () => {
+  it("recordRequest + recordBlockedRequest('allowlist') for an allowlist-blocked call", async () => {
     await mcpCall(url, 2, "Execute", {});
     expect(recorder.recordRequest).toHaveBeenCalled();
     const reqCall = recorder.recordRequest.mock.calls[0]!;
+    // Cardinality defense: blocked tool name is coerced to a sentinel
+    expect(reqCall[0]).toBe("_blocked");
     expect(reqCall[1]).toBe("blocked");
-    expect(recorder.recordBlockedRequest).toHaveBeenCalled();
+    expect(recorder.recordBlockedRequest).toHaveBeenCalledWith("allowlist");
   });
 
   it("recordRequest + recordInjectionFlag are called for a sanitizer-flagged call", async () => {
@@ -133,12 +135,41 @@ describe("MCP proxy MetricsRecorder wire-up", () => {
     expect(typeof flagCall[0]).toBe("string");
   });
 
-  it("recordRequest + recordBlockedRequest are called for a path-guard block", async () => {
+  it("recordRequest + recordBlockedRequest('path_guard') for a path-guard block", async () => {
     await mcpCall(url, 4, "Read", { path: "../../etc/passwd" });
     expect(recorder.recordRequest).toHaveBeenCalled();
     const reqCall = recorder.recordRequest.mock.calls[0]!;
+    expect(reqCall[0]).toBe("_blocked");
     expect(reqCall[1]).toBe("blocked");
-    expect(recorder.recordBlockedRequest).toHaveBeenCalled();
+    expect(recorder.recordBlockedRequest).toHaveBeenCalledWith("path_guard");
+  });
+});
+
+describe("MCP proxy MetricsRecorder — no_route block path", () => {
+  // "Orphan" is on the allowlist but has no route entry — the third documented
+  // block reason. Without this test, recordBlockedRequest("no_route") would be
+  // a regression that passes silently.
+  it("recordBlockedRequest('no_route') when an allowlisted tool has no route", async () => {
+    const recorder = makeSpyRecorder();
+    const bridge = makeBridge();
+    const { server, url } = await startServer(
+      makeConfig({
+        bridge,
+        allowedTools: ["Read", "Orphan"],
+        serverRoutes: { Read: "fs" },
+        recorder,
+      })
+    );
+    try {
+      await mcpCall(url, 50, "Orphan", {});
+      expect(recorder.recordRequest).toHaveBeenCalled();
+      const reqCall = recorder.recordRequest.mock.calls[0]!;
+      expect(reqCall[0]).toBe("_blocked");
+      expect(reqCall[1]).toBe("blocked");
+      expect(recorder.recordBlockedRequest).toHaveBeenCalledWith("no_route");
+    } finally {
+      await closeServer(server);
+    }
   });
 });
 

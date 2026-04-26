@@ -18,16 +18,9 @@ export interface ObservabilityConfig {
   readonly metrics: MetricsConfig;
 }
 
-const log = childLogger("langfuse");
+const log = childLogger("config");
 const DEFAULT_LANGFUSE_HOST = "https://cloud.langfuse.com";
 
-/**
- * Build a LangfuseConfig from an env-var record. The function takes its env
- * source as an argument so it is trivially unit-testable; the composition root
- * passes `process.env`. Returns `{ enabled: false }` whenever either credential
- * is missing or empty — agentic-press treats Langfuse as strictly opt-in and
- * must never throw on missing credentials.
- */
 /**
  * Build a MetricsConfig from an env-var record. Returns `{ enabled: false }`
  * when `METRICS_PORT` is absent, empty, or invalid (non-numeric, out of
@@ -47,6 +40,13 @@ export function loadMetricsConfig(
   return { enabled: true, port };
 }
 
+/**
+ * Build a LangfuseConfig from an env-var record. The function takes its env
+ * source as an argument so it is trivially unit-testable; the composition root
+ * passes `process.env`. Returns `{ enabled: false }` whenever either credential
+ * is missing or empty — agentic-press treats Langfuse as strictly opt-in and
+ * must never throw on missing credentials.
+ */
 export function loadLangfuseConfig(
   env: Readonly<Record<string, string | undefined>>
 ): LangfuseConfig {
