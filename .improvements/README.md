@@ -7,9 +7,8 @@ This directory holds **agent-suggested improvement candidates** waiting for huma
 ## How it works
 
 ```
-audit.ndjson  ─┐
-git log       ─┼─►  scripts/sweep-improvements.mjs  ─►  .improvements/<id>.md  ─►  human triage
-test outcomes ─┘                                                                    │
+audit.ndjson  ───►  scripts/sweep-improvements.mjs  ─►  .improvements/<id>.md  ─►  human triage
+                                                                                    │
                                                                                     ├─► dismiss (edit frontmatter or delete)
                                                                                     ├─► edit (open the file, refine the suggestion)
                                                                                     └─► address (npm run address-improvement -- <id>)
@@ -19,6 +18,8 @@ test outcomes ─┘                                                            
                                                                                                     └─► you (or another Claude Code session) implement,
                                                                                                         mark ready for review, merge as usual
 ```
+
+The MVP reads only the audit NDJSON. Future categories will pull in additional inputs (git log for TDD-skip detection, test outcomes for flake detection, Langfuse traces for token-heavy session detection) — see "Categories" below for the roadmap.
 
 ## Categories detected today
 
@@ -62,7 +63,7 @@ Mission Control's Memory Browser can render this directory as a tree view if you
 
 ## Security model
 
-- **Nothing in `.improvements/` is auto-loaded into agent context.** `CLAUDE.md` does not reference this directory.
+- **Nothing in `.improvements/` is auto-loaded into agent context.** CLAUDE.md describes the directory's *existence and workflow*, but doesn't include suggestion contents — the `@.learnings/LEARNING_INDEX.md` import is the only auto-loaded reflective content.
 - **Memory poisoning vector closed by design.** The agent observes; the human decides; only human-merged PRs propagate effects.
 - **Trust boundary unchanged.** Files in `.improvements/` have the same trust as any other tracked file in the repo — i.e., none until you read and merge them.
 

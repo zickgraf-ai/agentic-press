@@ -1,14 +1,19 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import type { Suggestion } from "./types.js";
+import type { Suggestion, Status } from "./types.js";
 
 /**
  * Write a Suggestion as a markdown file with YAML frontmatter to the
  * improvements directory. Returns the suggestion id (also the filename stem).
  *
- * Idempotent: if a file with the same id already exists in the directory,
- * the function returns the id without rewriting. This protects user edits
- * to the file from being clobbered by a subsequent sweep.
+ * Idempotent and dedupe-aware:
+ *  - If an open or addressed file with the same id exists, do nothing
+ *    (protects user edits and avoids clobbering accepted/in-flight items).
+ *  - If a dismissed file exists, REWRITE it — the human dismissed the
+ *    suggestion but the pattern recurred, which is itself signal worth
+ *    re-surfacing. The original dismissal is overwritten with a fresh
+ *    open suggestion. (Mirrors isDuplicate's semantics — these two
+ *    functions must agree on what counts as a duplicate.)
  */
 export function writeSuggestion(dir: string, suggestion: Suggestion, now: Date = new Date()): string {
   const id = generateSuggestionId(suggestion, now);
@@ -17,7 +22,12 @@ export function writeSuggestion(dir: string, suggestion: Suggestion, now: Date =
   }
   const filePath = join(dir, `${id}.md`);
   if (existsSync(filePath)) {
-    return id;
+    const existing = readFileSync(filePath, "utf8");
+    const status = parseStatusFromFrontmatter(existing);
+    // Only rewrite dismissed files — open and addressed are preserved.
+    if (status !== "dismissed") {
+      return id;
+    }
   }
   writeFileSync(filePath, buildSuggestionFile(id, suggestion, now), "utf8");
   return id;
@@ -101,7 +111,7 @@ Mission Control or run \`address-improvement ${id}\` to start a draft PR.
 `;
 }
 
-function formatEvidenceYaml(evidence: Record<string, unknown>): string {
+function formatEvidenceYaml(evidence: object): string {
   const lines: string[] = [];
   for (const [key, value] of Object.entries(evidence)) {
     if (Array.isArray(value)) {
@@ -146,7 +156,10 @@ export function isDuplicate(dir: string, id: string): boolean {
   return status !== "dismissed";
 }
 
-function parseStatusFromFrontmatter(content: string): string | null {
+function parseStatusFromFrontmatter(content: string): Status | null {
   const match = content.match(/^status:\s*(\S+)/m);
-  return match ? match[1]! : null;
+  if (!match) return null;
+  const value = match[1]!;
+  if (value === "open" || value === "dismissed" || value === "addressed") return value;
+  return null;
 }

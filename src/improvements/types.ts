@@ -23,17 +23,26 @@ export type Status = "open" | "dismissed" | "addressed";
 
 export interface SuggestionEvidence {
   /** Tool name for tool-keyed categories (allowlist-drift, tool-failure, bridge-timeout). */
-  tool?: string;
+  readonly tool?: string;
   /** Number of matching audit entries observed. */
-  count?: number;
+  readonly count?: number;
   /** ISO timestamp of the earliest matching entry. */
-  firstSeen?: string;
+  readonly firstSeen?: string;
   /** ISO timestamp of the most recent matching entry. */
-  lastSeen?: string;
+  readonly lastSeen?: string;
   /** Up to 3 sample error messages from matching entries (tool-failure, bridge-timeout). */
-  sampleErrors?: readonly string[];
-  /** Free-form additional fields per category. */
-  [key: string]: unknown;
+  readonly sampleErrors?: readonly string[];
+  /**
+   * Open-ended metadata bucket for category-specific fields that don't have a
+   * dedicated typed slot. Kept narrow on purpose — the typed fields above
+   * cover all current categories and a typo like `evidence.tol` would
+   * otherwise compile silently.
+   *
+   * TODO: when more categories land, refactor SuggestionEvidence into a
+   * discriminated union keyed on `category` so each category gets exactly the
+   * fields it needs.
+   */
+  readonly metadata?: Readonly<Record<string, unknown>>;
 }
 
 export interface Suggestion {

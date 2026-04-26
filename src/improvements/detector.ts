@@ -34,9 +34,13 @@ function detectAllowlistDrift(entries: readonly AuditEntry[], threshold: number)
   const byTool = new Map<string, AuditEntry[]>();
   for (const e of entries) {
     if (e.status !== "blocked") continue;
-    // The "_blocked" sentinel is a cardinality-defense placeholder used by
-    // server.ts when recording blocked tools to metrics — it is not a real
-    // tool name and would be a useless suggestion.
+    // Defensive guard: the "_blocked" sentinel is used by server.ts ONLY in
+    // the metrics-cardinality path (server.ts safeRecord coerces blocked
+    // tool names to "_blocked" before passing to recorder.recordRequest).
+    // The audit log keeps the real tool name, so this filter shouldn't fire
+    // in practice — but if a future refactor accidentally leaks the sentinel
+    // into AuditEntry, surfacing it as a suggestion would be useless. Keep
+    // the guard as a low-cost belt-and-braces.
     if (e.tool === "_blocked") continue;
     const list = byTool.get(e.tool) ?? [];
     list.push(e);

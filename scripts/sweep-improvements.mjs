@@ -1,6 +1,10 @@
-#!/usr/bin/env node
+#!/usr/bin/env -S npx tsx
 /**
  * Self-improvement sweep — issue #20.
+ *
+ * NOTE: shebang uses `npx tsx` because this script imports .ts modules
+ * directly. Run via `npm run sweep-improvements` (recommended) or
+ * `npx tsx scripts/sweep-improvements.mjs` (also works).
  *
  * Reads NDJSON audit log lines from a file (or stdin), analyzes them for
  * patterns that warrant human review, and writes new markdown files to
@@ -52,17 +56,32 @@ function readInput() {
 
 function parseEntries(text) {
   const entries = [];
+  let malformedCount = 0;
   for (const line of text.split("\n")) {
     const trimmed = line.trim();
     if (!trimmed) continue;
     try {
       entries.push(JSON.parse(trimmed));
     } catch {
-      // skip malformed lines — pino diagnostics may interleave with audit
-      // entries on the same stdout stream
+      // pino diagnostics may interleave with audit entries on the same
+      // stdout stream — those are expected to fail JSON parse and we skip
+      // them. We still count them so we can warn if EVERY line is bad
+      // (likely a corrupt file or wrong input).
+      malformedCount++;
     }
   }
-  // Filter to actual audit entries (have status field)
+  if (entries.length === 0 && malformedCount > 0) {
+    console.warn(
+      `[sweep] WARNING: input contained ${malformedCount} non-JSON lines and 0 parseable entries. ` +
+        `Did you pipe in the audit stream, or a different file?`
+    );
+  } else if (malformedCount > entries.length) {
+    console.warn(
+      `[sweep] note: ${malformedCount} non-JSON lines skipped (vs ${entries.length} JSON entries) — ` +
+        `usually pino diagnostics interleaved with audit; verify if unexpected`
+    );
+  }
+  // Filter to actual audit entries (have status + tool fields)
   return entries.filter((e) => e && typeof e === "object" && "status" in e && "tool" in e);
 }
 

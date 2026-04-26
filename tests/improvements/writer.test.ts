@@ -98,6 +98,35 @@ describe("buildSuggestionFile", () => {
     expect(out.toLowerCase()).toContain("how this was generated");
     expect(out).toContain("sweep-improvements");
   });
+
+  it("quotes evidence values containing YAML special chars (colon, bracket, etc)", () => {
+    const s = makeSuggestion({
+      evidence: { tool: "weird:name", count: 3, sampleErrors: ["error: with colon", "[brackets]"] },
+    });
+    const out = buildSuggestionFile("id", s, new Date());
+    // Values with colons or brackets must be JSON-stringified to preserve them
+    expect(out).toContain('tool: "weird:name"');
+    expect(out).toContain('"error: with colon"');
+    expect(out).toContain('"[brackets]"');
+  });
+
+  it("does not quote evidence values that are safe identifiers", () => {
+    const s = makeSuggestion({
+      evidence: { tool: "simple_name", count: 5 },
+    });
+    const out = buildSuggestionFile("id", s, new Date());
+    // Plain identifiers should appear unquoted
+    expect(out).toMatch(/^tool: simple_name$/m);
+    expect(out).toMatch(/^count: 5$/m);
+  });
+
+  it("quotes values containing newlines", () => {
+    const s = makeSuggestion({
+      evidence: { tool: "x", sampleErrors: ["multi\nline"] },
+    });
+    const out = buildSuggestionFile("id", s, new Date());
+    expect(out).toContain('"multi\\nline"');
+  });
 });
 
 describe("isDuplicate", () => {
@@ -174,7 +203,7 @@ describe("writeSuggestion", () => {
     expect(readdirSync(newDir)).toContain(`${id}.md`);
   });
 
-  it("does not overwrite an existing file with the same id (returns the id without re-writing)", () => {
+  it("does not overwrite an open file with the same id (preserves user edits)", () => {
     const id = writeSuggestion(dir, makeSuggestion(), new Date("2026-04-26T18:00:00Z"));
     const originalContent = readFileSync(join(dir, `${id}.md`), "utf8");
     // Add a marker so we can detect a rewrite
@@ -184,5 +213,33 @@ describe("writeSuggestion", () => {
     writeSuggestion(dir, makeSuggestion(), new Date("2026-04-26T18:00:00Z"));
     const after = readFileSync(join(dir, `${id}.md`), "utf8");
     expect(after).toContain("<!-- user-edit -->");
+  });
+
+  it("does not overwrite an addressed file (in-flight PR work must be preserved)", () => {
+    const id = writeSuggestion(dir, makeSuggestion(), new Date("2026-04-26T18:00:00Z"));
+    const filePath = join(dir, `${id}.md`);
+    // Simulate the address-improvement script having flipped status
+    const addressed = readFileSync(filePath, "utf8")
+      .replace(/^status: open$/m, "status: addressed");
+    writeFileSync(filePath, addressed + "\n<!-- in-flight -->");
+
+    writeSuggestion(dir, makeSuggestion(), new Date("2026-04-26T18:00:00Z"));
+    const after = readFileSync(filePath, "utf8");
+    expect(after).toContain("<!-- in-flight -->");
+    expect(after).toMatch(/^status: addressed$/m);
+  });
+
+  it("REWRITES a dismissed file (recurring pattern means dismissal was wrong — re-surface)", () => {
+    const id = writeSuggestion(dir, makeSuggestion(), new Date("2026-04-26T18:00:00Z"));
+    const filePath = join(dir, `${id}.md`);
+    // Simulate user having dismissed it
+    const dismissed = readFileSync(filePath, "utf8")
+      .replace(/^status: open$/m, "status: dismissed");
+    writeFileSync(filePath, dismissed);
+
+    // Second call should rewrite, restoring status: open
+    writeSuggestion(dir, makeSuggestion(), new Date("2026-04-26T18:00:00Z"));
+    const after = readFileSync(filePath, "utf8");
+    expect(after).toMatch(/^status: open$/m);
   });
 });

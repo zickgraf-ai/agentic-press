@@ -117,6 +117,64 @@ describe("detector — A3 tool failure pattern", () => {
   });
 });
 
+describe("detector — confidence levels", () => {
+  it("medium confidence at 1x to 2x threshold", () => {
+    const entries: AuditEntry[] = Array.from({ length: 4 }, () =>
+      entry({ tool: "X", status: "blocked" })
+    );
+    const out = detectImprovements(entries, { allowlistDriftThreshold: 3 });
+    expect(out[0]!.confidence).toBe("medium");
+  });
+
+  it("high confidence at >= 2x threshold", () => {
+    const entries: AuditEntry[] = Array.from({ length: 6 }, () =>
+      entry({ tool: "X", status: "blocked" })
+    );
+    const out = detectImprovements(entries, { allowlistDriftThreshold: 3 });
+    expect(out[0]!.confidence).toBe("high");
+  });
+
+  it("tool-failure also escalates to high at >= 2x threshold", () => {
+    const entries: AuditEntry[] = Array.from({ length: 6 }, () =>
+      entry({ tool: "Y", status: "error", errorMessage: "boom" })
+    );
+    const out = detectImprovements(entries, { toolFailureThreshold: 3 });
+    expect(out[0]!.confidence).toBe("high");
+  });
+});
+
+describe("detector — sampleErrors dedup and cap", () => {
+  it("dedupes duplicate error messages", () => {
+    const entries: AuditEntry[] = Array.from({ length: 5 }, () =>
+      entry({ tool: "Z", status: "error", errorMessage: "EACCES denied" })
+    );
+    const out = detectImprovements(entries, { toolFailureThreshold: 3 });
+    expect(out[0]!.evidence.sampleErrors).toEqual(["EACCES denied"]);
+  });
+
+  it("caps sampleErrors at 3 even with more distinct messages", () => {
+    const entries: AuditEntry[] = [
+      entry({ tool: "Z", status: "error", errorMessage: "err 1" }),
+      entry({ tool: "Z", status: "error", errorMessage: "err 2" }),
+      entry({ tool: "Z", status: "error", errorMessage: "err 3" }),
+      entry({ tool: "Z", status: "error", errorMessage: "err 4" }),
+      entry({ tool: "Z", status: "error", errorMessage: "err 5" }),
+    ];
+    const out = detectImprovements(entries, { toolFailureThreshold: 3 });
+    expect(out[0]!.evidence.sampleErrors).toHaveLength(3);
+  });
+
+  it("filters out missing errorMessage entries from samples", () => {
+    const entries: AuditEntry[] = [
+      entry({ tool: "Z", status: "error", errorMessage: "real error" }),
+      entry({ tool: "Z", status: "error" }), // no errorMessage
+      entry({ tool: "Z", status: "error", errorMessage: "another error" }),
+    ];
+    const out = detectImprovements(entries, { toolFailureThreshold: 3 });
+    expect(out[0]!.evidence.sampleErrors).toEqual(["real error", "another error"]);
+  });
+});
+
 describe("detector — defaults", () => {
   it("uses sensible defaults when no thresholds passed", () => {
     // Default thresholds should require enough evidence that one-off issues
