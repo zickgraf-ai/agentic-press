@@ -7,7 +7,7 @@ import { checkPath } from "../security/path-guard.js";
 import { sanitize } from "./sanitizer.js";
 import { sanitizeResponse } from "./response-sanitizer.js";
 import { logAuditEntry, type AuditEntry } from "./logger.js";
-import type { StdioBridge } from "./stdio-bridge.js";
+import { ResponseSizeExceededError, type StdioBridge } from "./stdio-bridge.js";
 import {
   createNoopTracer,
   type Tracer,
@@ -340,6 +340,47 @@ export function createProxyServer(config: ProxyServerConfig): Express {
         })
         .catch((err) => {
           if (res.headersSent) return;
+
+          // Response-size cap rejection. We deliberately reuse the response
+          // sanitizer's client-facing error message so an attacker cannot
+          // distinguish a size-cap rejection from a content-pattern rejection
+          // (size-probe defence — leaking a distinct -32001 + "size" signal
+          // would let an adversary binary-search the cap value). Operator
+          // visibility comes through the audit entry's structured
+          // errorMessage field instead.
+          if (err instanceof ResponseSizeExceededError) {
+            try {
+              audit(
+                tool,
+                toolArgs,
+                "blocked",
+                [],
+                "response size cap exceeded",
+                "response"
+              );
+            } catch (auditErr) {
+              reqLog.error({ err: auditErr }, "Audit logging failed");
+            }
+            reqLog.error(
+              {
+                server: serverName,
+                limitBytes: err.limitBytes,
+                observedBytes: err.observedBytes,
+              },
+              "Upstream response exceeded size cap"
+            );
+            safeSpan({ tool, status: "blocked", durationMs: Date.now() - start });
+            safeEnd({ outcome: "blocked" });
+            res.json(
+              jsonRpcError(
+                requestId,
+                -32001,
+                `Response blocked by response sanitizer (ref: ${correlationId})`
+              )
+            );
+            return;
+          }
+
           const rawMessage = err instanceof Error ? err.message : String(err);
           reqLog.error({ server: serverName, error: rawMessage }, "Bridge call failed");
           try {

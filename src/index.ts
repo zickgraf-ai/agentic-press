@@ -1,5 +1,9 @@
 import { createProxyServer, type ProxyServerConfig } from "./mcp-proxy/server.js";
-import { createStdioBridge, type StdioBridge } from "./mcp-proxy/stdio-bridge.js";
+import {
+  createStdioBridge,
+  DEFAULT_MAX_RESPONSE_BYTES,
+  type StdioBridge,
+} from "./mcp-proxy/stdio-bridge.js";
 import { parseLogLevel } from "./types.js";
 import { childLogger } from "./logger.js";
 import { loadLangfuseConfig } from "./observability/config.js";
@@ -17,9 +21,34 @@ const serverRoutes = parseServerRoutes(process.env.SERVER_ROUTES);
 validateServerConfig(serverDefs, serverRoutes);
 let bridge: StdioBridge | undefined;
 
+// MAX_RESPONSE_BYTES caps the size of any single upstream MCP response line
+// at the stdio-bridge read layer. 0 disables the cap. Fail-loud on invalid
+// input — silently falling back to the default would mask a typo in env
+// config and re-expose the OOM surface this guard exists to close.
+const maxResponseBytesEnv = process.env.MAX_RESPONSE_BYTES;
+const maxResponseBytes =
+  maxResponseBytesEnv === undefined
+    ? DEFAULT_MAX_RESPONSE_BYTES
+    : (() => {
+        const n = parseInt(maxResponseBytesEnv, 10);
+        if (isNaN(n) || n < 0 || String(n) !== maxResponseBytesEnv.trim()) {
+          throw new Error(
+            `Invalid MAX_RESPONSE_BYTES: "${maxResponseBytesEnv}" — must be a non-negative integer (0 disables)`
+          );
+        }
+        return n;
+      })();
+
 if (serverDefs.length > 0) {
-  bridge = createStdioBridge(serverDefs, { logLevel });
-  log.info({ serverCount: serverDefs.length, servers: serverDefs.map((s) => s.name) }, "Stdio bridge created");
+  bridge = createStdioBridge(serverDefs, { logLevel, maxResponseBytes });
+  log.info(
+    {
+      serverCount: serverDefs.length,
+      servers: serverDefs.map((s) => s.name),
+      maxResponseBytes,
+    },
+    "Stdio bridge created"
+  );
 }
 
 const port = parseInt(process.env.MCP_PROXY_PORT ?? "18923", 10);
