@@ -29,7 +29,7 @@ describe("parseServerDefs", () => {
 
   it("parses a single server definition", () => {
     const raw = '[{"name":"fs","command":"npx","args":["-y","x"]}]';
-    expect(parseServerDefs(raw)).toEqual([{ name: "fs", command: "npx", args: ["-y", "x"] }]);
+    expect(parseServerDefs(raw)).toEqual([{ name: "fs", transport: "stdio", command: "npx", args: ["-y", "x"] }]);
   });
 
   it("throws with a clear message on invalid JSON", () => {
@@ -56,13 +56,127 @@ describe("parseServerDefs", () => {
     expect(() => parseServerDefs('[{"name":"fs","command":"npx"}]')).toThrow(/MCP_SERVERS\[0\].*args/);
   });
 
+  // ─── HTTP transport (#26) ───
+  it("parses a single HTTP server definition with explicit transport: http", () => {
+    const raw = '[{"name":"remote","transport":"http","url":"https://mcp.example.com/mcp"}]';
+    const result = parseServerDefs(raw);
+    expect(result).toHaveLength(1);
+    expect(result[0]).toEqual({
+      name: "remote",
+      transport: "http",
+      url: "https://mcp.example.com/mcp",
+    });
+  });
+
+  it("parses an HTTP server with bearerToken and headers", () => {
+    const raw = '[{"name":"r","transport":"http","url":"https://x/mcp","bearerToken":"t","headers":{"X-Foo":"bar"}}]';
+    const result = parseServerDefs(raw);
+    expect(result[0]).toMatchObject({
+      transport: "http",
+      bearerToken: "t",
+      headers: { "X-Foo": "bar" },
+    });
+  });
+
+  it("defaults transport: stdio when command is present and transport is omitted (back-compat)", () => {
+    const raw = '[{"name":"fs","command":"npx","args":["x"]}]';
+    const result = parseServerDefs(raw);
+    expect(result[0]).toMatchObject({ transport: "stdio", command: "npx" });
+  });
+
+  it("preserves explicit transport: stdio", () => {
+    const raw = '[{"name":"fs","transport":"stdio","command":"npx","args":["x"]}]';
+    const result = parseServerDefs(raw);
+    expect(result[0]).toMatchObject({ transport: "stdio" });
+  });
+
+  it("rejects http server missing url", () => {
+    expect(() =>
+      parseServerDefs('[{"name":"r","transport":"http"}]')
+    ).toThrow(/url/i);
+  });
+
+  it("rejects http server with command field (mixed shape)", () => {
+    expect(() =>
+      parseServerDefs('[{"name":"r","transport":"http","url":"https://x","command":"npx","args":[]}]')
+    ).toThrow(/transport/i);
+  });
+
+  it("rejects unknown transport value", () => {
+    expect(() =>
+      parseServerDefs('[{"name":"r","transport":"smtp","url":"https://x"}]')
+    ).toThrow(/transport/i);
+  });
+
+  it("allows http:// for localhost", () => {
+    expect(() =>
+      parseServerDefs('[{"name":"r","transport":"http","url":"http://localhost:3000/mcp"}]')
+    ).not.toThrow();
+  });
+
+  it("allows http:// for 127.0.0.1", () => {
+    expect(() =>
+      parseServerDefs('[{"name":"r","transport":"http","url":"http://127.0.0.1:3000/mcp"}]')
+    ).not.toThrow();
+  });
+
+  it("allows http:// for ::1", () => {
+    expect(() =>
+      parseServerDefs('[{"name":"r","transport":"http","url":"http://[::1]:3000/mcp"}]')
+    ).not.toThrow();
+  });
+
+  it("rejects http:// for non-localhost host", () => {
+    expect(() =>
+      parseServerDefs('[{"name":"r","transport":"http","url":"http://example.com/mcp"}]')
+    ).toThrow(/https/i);
+  });
+
+  it("rejects malformed URL", () => {
+    expect(() =>
+      parseServerDefs('[{"name":"r","transport":"http","url":"not a url"}]')
+    ).toThrow();
+  });
+
+  it("rejects non-http/https scheme", () => {
+    expect(() =>
+      parseServerDefs('[{"name":"r","transport":"http","url":"file:///etc/passwd"}]')
+    ).toThrow();
+  });
+
+  // SSRF bypass guard: 0.0.0.0 is reachable from external interfaces but
+  // sometimes mistaken for "localhost". Force HTTPS for it.
+  it("rejects http:// for 0.0.0.0 (SSRF bypass vector)", () => {
+    expect(() =>
+      parseServerDefs('[{"name":"r","transport":"http","url":"http://0.0.0.0:3000/mcp"}]')
+    ).toThrow(/https/i);
+  });
+
+  it("rejects http server with non-string header value", () => {
+    expect(() =>
+      parseServerDefs('[{"name":"r","transport":"http","url":"https://x","headers":{"X-Foo":123}}]')
+    ).toThrow(/headers.*string/i);
+  });
+
+  it("rejects http server with array headers", () => {
+    expect(() =>
+      parseServerDefs('[{"name":"r","transport":"http","url":"https://x","headers":["a","b"]}]')
+    ).toThrow(/headers.*object/i);
+  });
+
+  it("rejects http server with non-object headers", () => {
+    expect(() =>
+      parseServerDefs('[{"name":"r","transport":"http","url":"https://x","headers":"oops"}]')
+    ).toThrow(/headers.*object/i);
+  });
+
   it("rejects an entry with non-array 'args'", () => {
     expect(() => parseServerDefs('[{"name":"fs","command":"npx","args":"bad"}]')).toThrow(/MCP_SERVERS\[0\]/);
   });
 
   it("accepts entries with optional 'env' field", () => {
     const raw = '[{"name":"fs","command":"npx","args":[],"env":{"FOO":"bar"}}]';
-    expect(parseServerDefs(raw)).toEqual([{ name: "fs", command: "npx", args: [], env: { FOO: "bar" } }]);
+    expect(parseServerDefs(raw)).toEqual([{ name: "fs", transport: "stdio", command: "npx", args: [], env: { FOO: "bar" } }]);
   });
 });
 

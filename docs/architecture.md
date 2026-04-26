@@ -10,9 +10,11 @@ Three execution domains:
 
 1. **sbx sandbox** — a Docker-backed isolated environment containing the AI agent (Claude Code, Codex, etc.). The agent has no direct access to host MCP servers.
 2. **Host — MCP proxy** — an Express HTTP server (default port `18923`) reachable from the sandbox over `host.docker.internal`. Implemented in `src/mcp-proxy/server.ts`.
-3. **Host — upstream MCP servers** — standard MCP server processes (filesystem, git, github, custom) spawned as child processes by the proxy and communicated with over stdio.
+3. **Upstream MCP servers** — reached via one of two transports selected per server in `MCP_SERVERS`:
+   - **stdio** (default) — local subprocess on the host (filesystem, git, github, custom). Spawned as a child process; JSON-RPC over stdin/stdout. Implemented in `src/mcp-proxy/stdio-bridge.ts`.
+   - **http** (Streamable HTTP) — remote MCP server reachable over HTTPS. Targets containers, sidecars, or services. Plain `http://` is permitted only for `localhost` / `127.0.0.1` / `::1`; `https://` is required for any other host. Implemented in `src/mcp-proxy/http-bridge.ts`.
 
-The sandbox speaks JSON-RPC 2.0 over HTTP to the proxy. The proxy speaks JSON-RPC 2.0 over stdio to the upstream servers via the stdio bridge (`src/mcp-proxy/stdio-bridge.ts`). Agents never see the upstream servers directly.
+The sandbox speaks JSON-RPC 2.0 over HTTP to the proxy. The proxy speaks JSON-RPC 2.0 over stdio (subprocess) or HTTP POST (remote) to the upstream servers. The composite transport in `src/mcp-proxy/transport.ts` dispatches `call(serverName, ...)` to the bridge that owns that server. Agents never see the upstream servers directly.
 
 ```mermaid
 flowchart LR
@@ -22,17 +24,23 @@ flowchart LR
   subgraph HOST["host machine"]
     P["MCP proxy<br/>(Express, :18923)"]
     B["stdio bridge"]
+    H["http bridge"]
     M1["MCP server:<br/>filesystem"]
     M2["MCP server:<br/>git"]
-    M3["MCP server:<br/>github"]
+  end
+  subgraph REMOTE["remote (Phase 2)"]
+    M3["MCP server:<br/>https://...<br/>(container/Lambda)"]
   end
   A -- "JSON-RPC / HTTP<br/>host.docker.internal:18923" --> P
   P -- "JSON-RPC / stdio" --> B
+  P -- "JSON-RPC / HTTPS<br/>Bearer auth" --> H
   B --> M1
   B --> M2
-  B --> M3
+  H --> M3
   M1 -.response.-> B
   B -.response.-> P
+  M3 -.response.-> H
+  H -.response.-> P
   P -.filtered response.-> A
   P -- "NDJSON audit" --> LOG[("stdout audit stream")]
   P -- "pino JSON" --> DIAG[("stdout diagnostic stream")]

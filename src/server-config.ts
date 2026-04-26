@@ -1,4 +1,4 @@
-import type { McpServerDef } from "./mcp-proxy/stdio-bridge.js";
+import type { McpServerDef, McpStdioServerDef, McpHttpServerDef } from "./mcp-proxy/transport.js";
 import { DEFAULT_MAX_RESPONSE_BYTES } from "./mcp-proxy/stdio-bridge.js";
 import { childLogger } from "./logger.js";
 
@@ -32,14 +32,58 @@ export function parseMaxResponseBytes(raw: string | undefined): number {
   return n;
 }
 
+/** Hostnames that are allowed to use http:// (everything else must use https://). */
+const LOCALHOST_HOSTNAMES = new Set(["localhost", "127.0.0.1", "::1"]);
+
+/**
+ * Validate an HTTP server URL: must be a parseable URL with http or https scheme,
+ * and http:// is only allowed for localhost (CVE-class defence — plain HTTP to
+ * a remote MCP server exposes the bearer token and request/response payloads to
+ * any on-path attacker).
+ */
+function validateHttpUrl(url: string, idx: number): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    throw new Error(
+      `MCP_SERVERS[${idx}].url is not a valid URL (${reason}): ${JSON.stringify(url)}`
+    );
+  }
+  if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+    throw new Error(
+      `MCP_SERVERS[${idx}].url must use http:// or https:// scheme, got ${parsed.protocol}`
+    );
+  }
+  // Strip IPv6 brackets if present (URL parser leaves them in place)
+  const host = parsed.hostname.replace(/^\[|\]$/g, "");
+  // 0.0.0.0 is NOT considered localhost — it can be reached from external
+  // interfaces and is a known SSRF bypass vector. Force https:// for it.
+  if (parsed.protocol === "http:" && !LOCALHOST_HOSTNAMES.has(host)) {
+    throw new Error(
+      `MCP_SERVERS[${idx}].url uses http:// for non-localhost host "${host}". ` +
+        `Only localhost / 127.0.0.1 / ::1 may use http://; use https:// for remote servers.`
+    );
+  }
+}
+
 /**
  * Parse MCP server definitions from an env-var string.
  *
- * Expected format: JSON array of objects with `name`, `command`, `args`, and optional `env`.
- * Example: `[{"name":"fs","command":"npx","args":["-y","@modelcontextprotocol/server-filesystem"]}]`
+ * Expected format: JSON array of objects discriminated by `transport`:
+ *   - stdio (default if `command` present): { name, command, args, env? }
+ *   - http: { name, transport: "http", url, bearerToken?, headers? }
+ *
+ * Examples:
+ *   `[{"name":"fs","command":"npx","args":["-y","@modelcontextprotocol/server-filesystem"]}]`
+ *   `[{"name":"remote","transport":"http","url":"https://mcp.example.com/mcp","bearerToken":"..."}]`
+ *
+ * For backward compatibility, entries with `command` and no `transport` field
+ * default to `transport: "stdio"`.
  *
  * @param raw - Value of `process.env.MCP_SERVERS`. Returns `[]` if falsy or whitespace-only.
- * @throws On invalid JSON or wrong runtime shape (not an array, or entries missing required fields).
+ * @throws On invalid JSON, wrong shape, or HTTPS policy violations.
  */
 export function parseServerDefs(raw: string | undefined): McpServerDef[] {
   if (!raw?.trim()) return [];
@@ -55,22 +99,92 @@ export function parseServerDefs(raw: string | undefined): McpServerDef[] {
         'Example: MCP_SERVERS=\'[{"name":"fs","command":"npx","args":["-y","pkg"]}]\''
     );
   }
+
+  const result: McpServerDef[] = [];
   for (let i = 0; i < parsed.length; i++) {
     const entry = parsed[i];
-    if (
-      typeof entry !== "object" ||
-      entry === null ||
-      typeof entry.name !== "string" ||
-      typeof entry.command !== "string" ||
-      !Array.isArray(entry.args)
-    ) {
+    if (typeof entry !== "object" || entry === null || typeof entry.name !== "string") {
       throw new Error(
-        `MCP_SERVERS[${i}] is invalid — each entry must have string "name", string "command", and array "args". ` +
+        `MCP_SERVERS[${i}] is invalid — each entry must be an object with a string "name". ` +
           `Got: ${JSON.stringify(entry)}`
       );
     }
+
+    // Discriminate on transport field (default to "stdio" for back-compat)
+    const transport = entry.transport;
+    if (transport !== undefined && transport !== "stdio" && transport !== "http") {
+      throw new Error(
+        `MCP_SERVERS[${i}].transport must be "stdio" or "http", got ${JSON.stringify(transport)}`
+      );
+    }
+
+    const isHttp = transport === "http";
+
+    if (isHttp) {
+      if (typeof entry.url !== "string") {
+        throw new Error(
+          `MCP_SERVERS[${i}] is invalid — http transport requires string "url". ` +
+            `Got: ${JSON.stringify(entry)}`
+        );
+      }
+      if ("command" in entry || "args" in entry) {
+        throw new Error(
+          `MCP_SERVERS[${i}] mixes http and stdio fields — http transport must not have "command" or "args".`
+        );
+      }
+      validateHttpUrl(entry.url, i);
+
+      // Validate headers shape strictly — non-object, array, or non-string
+      // values would otherwise pass through silently and produce malformed
+      // requests at runtime.
+      let validatedHeaders: Record<string, string> | undefined;
+      if (entry.headers !== undefined) {
+        if (typeof entry.headers !== "object" || entry.headers === null || Array.isArray(entry.headers)) {
+          throw new Error(
+            `MCP_SERVERS[${i}].headers must be a JSON object of string→string pairs, ` +
+              `got ${Array.isArray(entry.headers) ? "array" : typeof entry.headers}`
+          );
+        }
+        for (const [k, v] of Object.entries(entry.headers)) {
+          if (typeof v !== "string") {
+            throw new Error(
+              `MCP_SERVERS[${i}].headers["${k}"] must be a string, got ${typeof v}`
+            );
+          }
+        }
+        validatedHeaders = entry.headers as Record<string, string>;
+      }
+
+      const def: McpHttpServerDef = {
+        name: entry.name,
+        transport: "http",
+        url: entry.url,
+        ...(typeof entry.bearerToken === "string" ? { bearerToken: entry.bearerToken } : {}),
+        ...(validatedHeaders ? { headers: validatedHeaders } : {}),
+      };
+      result.push(def);
+    } else {
+      // stdio (explicit or defaulted)
+      if (typeof entry.command !== "string" || !Array.isArray(entry.args)) {
+        throw new Error(
+          `MCP_SERVERS[${i}] is invalid — stdio transport requires string "command" and array "args". ` +
+            `Got: ${JSON.stringify(entry)}`
+        );
+      }
+      const def: McpStdioServerDef = {
+        name: entry.name,
+        transport: "stdio",
+        command: entry.command,
+        args: entry.args,
+        ...(entry.env && typeof entry.env === "object"
+          ? { env: entry.env as Record<string, string> }
+          : {}),
+      };
+      result.push(def);
+    }
   }
-  return parsed as McpServerDef[];
+
+  return result;
 }
 
 /**

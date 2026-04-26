@@ -38,12 +38,17 @@ export class ResponseSizeExceededError extends Error {
   }
 }
 
-export interface McpServerDef {
-  name: string;
-  command: string;
-  args: string[];
-  env?: Record<string, string>;
-}
+// McpServerDef and McpStdioServerDef are now defined in transport.ts and
+// re-exported here for backward compatibility. New code should import from
+// "./transport.js".
+export type { McpServerDef, McpStdioServerDef, McpHttpServerDef, McpTransport } from "./transport.js";
+import type { McpStdioServerDef as _StdioDef } from "./transport.js";
+
+/**
+ * Stdio bridge accepts only stdio server defs. The composition root narrows
+ * the discriminated union before passing servers to this constructor.
+ */
+type StdioServerDef = _StdioDef;
 
 /** Subset of ChildProcess fields exposed for test introspection. */
 export interface ProcessInfo {
@@ -96,7 +101,7 @@ interface PendingHandler {
 }
 
 interface ManagedProcess {
-  def: McpServerDef;
+  def: StdioServerDef;
   proc: ChildProcess;
   nextId: number;
   pending: Map<number, PendingHandler>;
@@ -204,7 +209,7 @@ function handleNonJsonLine(
 }
 
 function spawnServer(
-  def: McpServerDef,
+  def: StdioServerDef,
   logLevel: LogLevel,
   failFastNonJsonLines: number,
   maxResponseBytes: number
@@ -356,7 +361,7 @@ function spawnServer(
   return managed;
 }
 
-export function createStdioBridge(servers: McpServerDef[], options: StdioBridgeOptions = {}): StdioBridge {
+export function createStdioBridge(servers: StdioServerDef[], options: StdioBridgeOptions = {}): StdioBridge {
   // Resolve defaults once at construction time so all consumers see the same values
   const logLevel: LogLevel = options.logLevel ?? "info";
   const failFastNonJsonLines = options.failFastNonJsonLines ?? 5;
@@ -364,7 +369,7 @@ export function createStdioBridge(servers: McpServerDef[], options: StdioBridgeO
   const hardCeilingMs = options.shutdownHardCeilingMs ?? 2000;
   const maxResponseBytes = options.maxResponseBytes ?? DEFAULT_MAX_RESPONSE_BYTES;
   const processes = new Map<string, ManagedProcess>();
-  const definitions = new Map<string, McpServerDef>();
+  const definitions = new Map<string, StdioServerDef>();
 
   for (const def of servers) {
     definitions.set(def.name, def);
