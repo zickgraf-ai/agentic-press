@@ -144,6 +144,32 @@ describe("parseServerDefs", () => {
     ).toThrow();
   });
 
+  // SSRF bypass guard: 0.0.0.0 is reachable from external interfaces but
+  // sometimes mistaken for "localhost". Force HTTPS for it.
+  it("rejects http:// for 0.0.0.0 (SSRF bypass vector)", () => {
+    expect(() =>
+      parseServerDefs('[{"name":"r","transport":"http","url":"http://0.0.0.0:3000/mcp"}]')
+    ).toThrow(/https/i);
+  });
+
+  it("rejects http server with non-string header value", () => {
+    expect(() =>
+      parseServerDefs('[{"name":"r","transport":"http","url":"https://x","headers":{"X-Foo":123}}]')
+    ).toThrow(/headers.*string/i);
+  });
+
+  it("rejects http server with array headers", () => {
+    expect(() =>
+      parseServerDefs('[{"name":"r","transport":"http","url":"https://x","headers":["a","b"]}]')
+    ).toThrow(/headers.*object/i);
+  });
+
+  it("rejects http server with non-object headers", () => {
+    expect(() =>
+      parseServerDefs('[{"name":"r","transport":"http","url":"https://x","headers":"oops"}]')
+    ).toThrow(/headers.*object/i);
+  });
+
   it("rejects an entry with non-array 'args'", () => {
     expect(() => parseServerDefs('[{"name":"fs","command":"npx","args":"bad"}]')).toThrow(/MCP_SERVERS\[0\]/);
   });

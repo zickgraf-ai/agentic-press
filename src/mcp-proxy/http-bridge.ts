@@ -85,73 +85,112 @@ export function createHttpBridge(
       const id = nextId++;
       const body = JSON.stringify({ jsonrpc: "2.0", id, method, params });
 
+      // Header precedence: custom headers FIRST (lowest priority), then our
+      // Content-Type/Accept defaults, then Authorization. A malicious or
+      // misconfigured `headers: { "Content-Type": "text/plain" }` cannot
+      // override the JSON content type and break upstream parsing, and
+      // `headers: { "Authorization": "..." }` cannot override the bearer
+      // token (it would otherwise be a way to bypass the bearerToken field).
       const headers: Record<string, string> = {
+        ...server.headers,
         "Content-Type": "application/json",
         Accept: "application/json",
-        ...server.headers,
       };
       if (server.bearerToken) {
         headers["Authorization"] = `Bearer ${server.bearerToken}`;
       }
 
+      // Single AbortController covers the FULL request lifecycle: send,
+      // headers, body read. A malicious upstream that sends headers fast
+      // then drip-feeds the body would otherwise stall the proxy
+      // indefinitely (the original timeout was cleared after fetch resolved).
       const controller = new AbortController();
       const timeoutHandle = setTimeout(() => controller.abort(), requestTimeoutMs);
 
-      let response: Response;
       try {
-        response = await fetchImpl(server.url, {
-          method: "POST",
-          headers,
-          body,
-          signal: controller.signal,
-        });
-      } catch (err) {
-        clearTimeout(timeoutHandle);
-        if (err instanceof Error && err.name === "AbortError") {
+        let response: Response;
+        try {
+          response = await fetchImpl(server.url, {
+            method: "POST",
+            headers,
+            body,
+            signal: controller.signal,
+            // SECURITY: Do not follow redirects. A compromised or hostile
+            // upstream could 301/302 to attacker.com and fetch would replay
+            // the Authorization: Bearer header, exfiltrating the token.
+            // Same vulnerability class as CVE-2025-6514.
+            redirect: "error",
+          });
+        } catch (err) {
+          if (err instanceof Error && err.name === "AbortError") {
+            throw new Error(
+              `HTTP server "${serverName}" timed out after ${requestTimeoutMs}ms`
+            );
+          }
+          // Wrap with server context so operators can identify which upstream
+          // failed (DNS errors, TLS errors, connection refused all land here).
+          const msg = err instanceof Error ? err.message : String(err);
+          log.warn({ server: serverName, url: server.url, error: msg }, "HTTP request failed");
+          throw new Error(`HTTP server "${serverName}" request failed: ${msg}`);
+        }
+
+        if (!response.ok) {
+          log.warn(
+            { server: serverName, status: response.status, statusText: response.statusText },
+            "HTTP server returned non-2xx"
+          );
           throw new Error(
-            `HTTP server "${serverName}" timed out after ${requestTimeoutMs}ms`
+            `HTTP server "${serverName}" returned ${response.status} ${response.statusText}`
           );
         }
-        throw err;
-      }
-      clearTimeout(timeoutHandle);
 
-      if (!response.ok) {
-        throw new Error(
-          `HTTP server "${serverName}" returned ${response.status} ${response.statusText}`
-        );
-      }
-
-      const text = await response.text();
-
-      // Enforce response size cap. Same error type as stdio so server.ts's
-      // existing -32001 indistinguishable-rejection branch handles both.
-      if (maxResponseBytes > 0) {
-        const observed = Buffer.byteLength(text, "utf8");
-        if (observed > maxResponseBytes) {
-          throw new ResponseSizeExceededError(serverName, maxResponseBytes, observed);
+        // STREAM the body and enforce the byte cap incrementally — abort the
+        // moment we exceed it. This bounds memory at maxResponseBytes (plus
+        // one chunk's worth of overhead) instead of letting the full body
+        // buffer first. Multi-GB responses can no longer OOM the proxy.
+        let text: string;
+        try {
+          text = await readBodyWithCap(response, serverName, maxResponseBytes);
+        } catch (err) {
+          if (err instanceof ResponseSizeExceededError) throw err;
+          if (err instanceof Error && err.name === "AbortError") {
+            throw new Error(
+              `HTTP server "${serverName}" timed out after ${requestTimeoutMs}ms while reading body`
+            );
+          }
+          const msg = err instanceof Error ? err.message : String(err);
+          log.warn({ server: serverName, error: msg }, "Failed to read response body");
+          throw new Error(`HTTP server "${serverName}" body read failed: ${msg}`);
         }
-      }
 
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(text);
-      } catch (err) {
-        const msg = err instanceof Error ? err.message : String(err);
-        throw new Error(`HTTP server "${serverName}" returned non-JSON response: ${msg}`);
-      }
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(text);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          throw new Error(`HTTP server "${serverName}" returned non-JSON response: ${msg}`);
+        }
 
-      if (typeof parsed !== "object" || parsed === null) {
-        throw new Error(`HTTP server "${serverName}" returned malformed JSON-RPC envelope`);
-      }
-      const env = parsed as { id?: unknown; result?: unknown; error?: { message?: string; code?: number } };
+        if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) {
+          throw new Error(`HTTP server "${serverName}" returned malformed JSON-RPC envelope`);
+        }
+        const env = parsed as { id?: unknown; result?: unknown; error?: { message?: string; code?: number } };
 
-      if (env.error) {
-        const msg = env.error.message ?? "unknown error";
-        throw new Error(`HTTP server "${serverName}" returned JSON-RPC error: ${msg}`);
-      }
+        if (env.error) {
+          const msg = env.error.message ?? "unknown error";
+          throw new Error(`HTTP server "${serverName}" returned JSON-RPC error: ${msg}`);
+        }
 
-      return env.result;
+        // JSON-RPC 2.0 spec: a successful response MUST contain a `result`
+        // member. Missing both `result` and `error` is a malformed envelope.
+        if (!("result" in env)) {
+          throw new Error(`HTTP server "${serverName}" returned envelope with neither result nor error`);
+        }
+
+        return env.result;
+      } finally {
+        clearTimeout(timeoutHandle);
+      }
     },
 
     async shutdown() {
@@ -160,4 +199,38 @@ export function createHttpBridge(
       log.debug("HTTP bridge shutdown — no persistent state");
     },
   };
+}
+
+/**
+ * Read the response body as text, enforcing a byte cap during the stream
+ * read. Aborts the stream and throws ResponseSizeExceededError as soon as
+ * the accumulated bytes exceed `maxBytes`. With `maxBytes <= 0`, the cap
+ * is disabled and we fall back to the standard `response.text()` (still
+ * bounded by Node's HTTP impl, but no early abort).
+ */
+async function readBodyWithCap(
+  response: Response,
+  serverName: string,
+  maxBytes: number
+): Promise<string> {
+  if (maxBytes <= 0 || !response.body) {
+    return response.text();
+  }
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    if (!value) continue;
+    totalBytes += value.byteLength;
+    if (totalBytes > maxBytes) {
+      // Cancel the underlying connection so the upstream stops sending.
+      // Fire-and-forget: we already have what we need to throw.
+      void reader.cancel().catch(() => {});
+      throw new ResponseSizeExceededError(serverName, maxBytes, totalBytes);
+    }
+    chunks.push(value);
+  }
+  return Buffer.concat(chunks).toString("utf8");
 }

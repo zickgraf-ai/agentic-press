@@ -45,9 +45,10 @@ function validateHttpUrl(url: string, idx: number): void {
   let parsed: URL;
   try {
     parsed = new URL(url);
-  } catch {
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
     throw new Error(
-      `MCP_SERVERS[${idx}].url is not a valid URL: ${JSON.stringify(url)}`
+      `MCP_SERVERS[${idx}].url is not a valid URL (${reason}): ${JSON.stringify(url)}`
     );
   }
   if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
@@ -57,6 +58,8 @@ function validateHttpUrl(url: string, idx: number): void {
   }
   // Strip IPv6 brackets if present (URL parser leaves them in place)
   const host = parsed.hostname.replace(/^\[|\]$/g, "");
+  // 0.0.0.0 is NOT considered localhost — it can be reached from external
+  // interfaces and is a known SSRF bypass vector. Force https:// for it.
   if (parsed.protocol === "http:" && !LOCALHOST_HOSTNAMES.has(host)) {
     throw new Error(
       `MCP_SERVERS[${idx}].url uses http:// for non-localhost host "${host}". ` +
@@ -130,14 +133,34 @@ export function parseServerDefs(raw: string | undefined): McpServerDef[] {
         );
       }
       validateHttpUrl(entry.url, i);
+
+      // Validate headers shape strictly — non-object, array, or non-string
+      // values would otherwise pass through silently and produce malformed
+      // requests at runtime.
+      let validatedHeaders: Record<string, string> | undefined;
+      if (entry.headers !== undefined) {
+        if (typeof entry.headers !== "object" || entry.headers === null || Array.isArray(entry.headers)) {
+          throw new Error(
+            `MCP_SERVERS[${i}].headers must be a JSON object of string→string pairs, ` +
+              `got ${Array.isArray(entry.headers) ? "array" : typeof entry.headers}`
+          );
+        }
+        for (const [k, v] of Object.entries(entry.headers)) {
+          if (typeof v !== "string") {
+            throw new Error(
+              `MCP_SERVERS[${i}].headers["${k}"] must be a string, got ${typeof v}`
+            );
+          }
+        }
+        validatedHeaders = entry.headers as Record<string, string>;
+      }
+
       const def: McpHttpServerDef = {
         name: entry.name,
         transport: "http",
         url: entry.url,
         ...(typeof entry.bearerToken === "string" ? { bearerToken: entry.bearerToken } : {}),
-        ...(entry.headers && typeof entry.headers === "object"
-          ? { headers: entry.headers as Record<string, string> }
-          : {}),
+        ...(validatedHeaders ? { headers: validatedHeaders } : {}),
       };
       result.push(def);
     } else {

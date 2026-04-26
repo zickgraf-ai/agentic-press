@@ -253,3 +253,192 @@ describe("createHttpBridge — multiple servers", () => {
     }
   });
 });
+
+describe("createHttpBridge — security: redirect rejection (#26 review C1)", () => {
+  // CRITICAL invariant: a redirect from the upstream MUST NOT cause the bridge
+  // to replay Authorization: Bearer at the redirect target. We set
+  // `redirect: "error"` on fetch so any 3xx aborts the request entirely.
+  it("rejects when upstream returns a redirect (would replay bearer token otherwise)", async () => {
+    const app: Express = express();
+    app.post("/mcp", (_req, res) => {
+      res.redirect(307, "http://attacker.example.com/steal");
+    });
+    const server = await new Promise<Server>((resolve) => {
+      const s = app.listen(0, "127.0.0.1", () => resolve(s));
+    });
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`;
+    const bridge = createHttpBridge([
+      { name: "remote", transport: "http", url, bearerToken: "secret-token" },
+    ]);
+    try {
+      // The bridge MUST throw — fetch's redirect:"error" causes a TypeError
+      // before any retry could exfiltrate the token.
+      await expect(bridge.call("remote", "tools/call", {})).rejects.toThrow();
+    } finally {
+      await bridge.shutdown();
+      await closeServer(server);
+    }
+  });
+});
+
+describe("createHttpBridge — slow-drip body DoS (#26 review C2)", () => {
+  // The original implementation cleared the timeout after fetch resolved,
+  // leaving response.text() unbounded. A malicious upstream that sends
+  // headers immediately then drips body bytes could stall the proxy
+  // forever. The fix puts the timeout in a finally and threads the abort
+  // signal through both phases.
+  it("aborts a slow-drip response body before it completes", async () => {
+    const app: Express = express();
+    app.post("/mcp", (_req, res) => {
+      // Send headers immediately so fetch() resolves
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.write('{"jsonrpc":"2.0","id":1,"result":');
+      // Then never finish — let the timeout fire
+    });
+    const server = await new Promise<Server>((resolve) => {
+      const s = app.listen(0, "127.0.0.1", () => resolve(s));
+    });
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`;
+    const bridge = createHttpBridge(
+      [{ name: "remote", transport: "http", url }],
+      { requestTimeoutMs: 100 }
+    );
+    try {
+      await expect(bridge.call("remote", "tools/call", {})).rejects.toThrow(/timed out/i);
+    } finally {
+      await bridge.shutdown();
+      // Force close so the hanging response doesn't keep the test alive
+      await closeServer(server);
+    }
+  }, 5000);
+});
+
+describe("createHttpBridge — streaming size cap (#26 review C3)", () => {
+  // The original buffered the full body before measuring. A multi-GB response
+  // would OOM before the cap fired. The fix streams the body and aborts as
+  // soon as accumulated bytes exceed the cap.
+  it("cancels the response stream as soon as the byte cap is exceeded mid-stream", async () => {
+    const app: Express = express();
+    app.post("/mcp", (_req, res) => {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      // Stream chunks. The cap should trip after a few hundred bytes, well
+      // before the simulated "huge" payload completes.
+      const chunk = "x".repeat(500);
+      let sent = 0;
+      const sendNext = () => {
+        if (sent >= 50_000) { res.end(); return; }
+        res.write(chunk);
+        sent += chunk.length;
+        setImmediate(sendNext);
+      };
+      sendNext();
+    });
+    const server = await new Promise<Server>((resolve) => {
+      const s = app.listen(0, "127.0.0.1", () => resolve(s));
+    });
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`;
+    const bridge = createHttpBridge(
+      [{ name: "remote", transport: "http", url }],
+      { maxResponseBytes: 1000 }
+    );
+    try {
+      await expect(bridge.call("remote", "tools/call", {})).rejects.toBeInstanceOf(ResponseSizeExceededError);
+    } finally {
+      await bridge.shutdown();
+      await closeServer(server);
+    }
+  });
+});
+
+describe("createHttpBridge — header precedence (#26 review I4)", () => {
+  it("custom headers cannot override Content-Type or Authorization", async () => {
+    const captured: Record<string, string | undefined>[] = [];
+    const app: Express = express();
+    app.use(express.json());
+    app.post("/mcp", (req, res) => {
+      captured.push({
+        contentType: req.header("content-type"),
+        authorization: req.header("authorization"),
+      });
+      res.json({ jsonrpc: "2.0", id: req.body.id, result: { ok: true } });
+    });
+    const server = await new Promise<Server>((resolve) => {
+      const s = app.listen(0, "127.0.0.1", () => resolve(s));
+    });
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`;
+    const bridge = createHttpBridge([
+      {
+        name: "remote",
+        transport: "http",
+        url,
+        bearerToken: "real-token",
+        headers: {
+          "Content-Type": "text/plain",       // Should be ignored
+          "Authorization": "Bearer fake-token", // Should be ignored
+          "X-Allowed": "yes",                   // Should pass through
+        },
+      },
+    ]);
+    try {
+      await bridge.call("remote", "tools/call", {});
+      expect(captured[0]!.contentType).toContain("application/json");
+      expect(captured[0]!.authorization).toBe("Bearer real-token");
+    } finally {
+      await bridge.shutdown();
+      await closeServer(server);
+    }
+  });
+});
+
+describe("createHttpBridge — malformed responses (#26 review S11, S13, S17)", () => {
+  it("rejects when upstream returns valid JSON but not an object (array)", async () => {
+    const { server, url } = await startMockMcpServer(() => [1, 2, 3]);
+    const bridge = createHttpBridge([{ name: "remote", transport: "http", url }]);
+    try {
+      await expect(bridge.call("remote", "tools/call", {})).rejects.toThrow(/malformed/i);
+    } finally {
+      await bridge.shutdown();
+      await closeServer(server);
+    }
+  });
+
+  it("rejects when upstream returns HTML error page (non-JSON body)", async () => {
+    const app: Express = express();
+    app.post("/mcp", (_req, res) => {
+      res.status(200).type("text/html").send("<html><body>Oops</body></html>");
+    });
+    const server = await new Promise<Server>((resolve) => {
+      const s = app.listen(0, "127.0.0.1", () => resolve(s));
+    });
+    const url = `http://127.0.0.1:${(server.address() as AddressInfo).port}/mcp`;
+    const bridge = createHttpBridge([{ name: "remote", transport: "http", url }]);
+    try {
+      await expect(bridge.call("remote", "tools/call", {})).rejects.toThrow(/non-JSON/i);
+    } finally {
+      await bridge.shutdown();
+      await closeServer(server);
+    }
+  });
+
+  it("rejects envelope with neither result nor error (JSON-RPC 2.0 spec violation)", async () => {
+    const { server, url } = await startMockMcpServer((body) => ({ jsonrpc: "2.0", id: body.id }));
+    const bridge = createHttpBridge([{ name: "remote", transport: "http", url }]);
+    try {
+      await expect(bridge.call("remote", "tools/call", {})).rejects.toThrow(/neither result nor error/i);
+    } finally {
+      await bridge.shutdown();
+      await closeServer(server);
+    }
+  });
+});
+
+describe("createHttpBridge — duplicate server names", () => {
+  it("throws on duplicate server names in constructor", () => {
+    expect(() =>
+      createHttpBridge([
+        { name: "dup", transport: "http", url: "https://a.com/mcp" },
+        { name: "dup", transport: "http", url: "https://b.com/mcp" },
+      ])
+    ).toThrow(/duplicate/i);
+  });
+});
