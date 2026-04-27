@@ -29,8 +29,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 
-// Resolve compiled detector/writer from dist if running compiled, else from
-// tsx via npm script. We assume `npm run sweep-improvements` invokes via tsx.
+// Imported as .ts — requires tsx (see shebang and the npm script wrapper).
 const { detectImprovements } = await import("../src/improvements/detector.ts");
 const { writeSuggestion, isDuplicate, generateSuggestionId } = await import(
   "../src/improvements/writer.ts"

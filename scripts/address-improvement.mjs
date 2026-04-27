@@ -64,11 +64,6 @@ function run(cmd, args, opts = {}) {
   return execFileSync(cmd, args, { stdio: "inherit", ...opts });
 }
 
-/** Run a command and capture stdout as trimmed string. */
-function runCapture(cmd, args) {
-  return execFileSync(cmd, args, { encoding: "utf8" }).trim();
-}
-
 // CLAUDE.md rule: always create a feature branch from main, not HEAD.
 console.log(`[address] fetching origin/main and creating branch ${branchName} from it`);
 try {

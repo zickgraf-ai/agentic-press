@@ -158,8 +158,7 @@ export function isDuplicate(dir: string, id: string): boolean {
 
 function parseStatusFromFrontmatter(content: string): Status | null {
   const match = content.match(/^status:\s*(\S+)/m);
-  if (!match) return null;
-  const value = match[1]!;
+  const value = match?.[1] ?? "";
   if (value === "open" || value === "dismissed" || value === "addressed") return value;
   return null;
 }
