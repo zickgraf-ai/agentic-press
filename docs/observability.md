@@ -52,12 +52,31 @@ Standard fields:
 
 ### Audit log
 
-`src/mcp-proxy/logger.ts` writes audit entries directly to `process.stdout`
-(one JSON object per line, not pino-formatted). Every request emits exactly
-one entry with `timestamp`, `tool`, `args`, `status` (`allowed`, `blocked`,
-`flagged`, `error`), `flags`, `durationMs`, and optional `errorMessage`. The
-audit stream is the source of truth for who-called-what; the pino log is
-operator-facing diagnostics.
+`src/mcp-proxy/logger.ts` writes audit entries directly as one JSON object per
+line (not pino-formatted). Every request emits exactly one entry with
+`timestamp`, `tool`, `args`, `status` (`allowed`, `blocked`, `flagged`,
+`error`), `flags`, `durationMs`, and optional `errorMessage`. The audit stream
+is the source of truth for who-called-what; the pino log is operator-facing
+diagnostics.
+
+#### Destination — `AUDIT_LOG_FILE`
+
+By default, audit entries go to `process.stdout`, interleaved with pino
+diagnostics. Fine for development, awkward for capture. Set `AUDIT_LOG_FILE`
+to a path and the proxy writes audit entries there with synchronous
+`fs.writeSync` — no stream buffering, no pino interleave, no Ctrl+C race.
+Recommended for production and for any workflow that consumes the audit log
+(e.g., the [`sweep-improvements`](../.improvements/README.md) script).
+
+```dotenv
+AUDIT_LOG_FILE=/var/log/agentic-press/audit.ndjson
+```
+
+The file is opened in append mode (preserves prior session entries) and
+closed cleanly on `SIGINT`/`SIGTERM`. If the file cannot be opened (permission
+denied, missing parent directory), the proxy falls back to stdout with a
+`console.warn` — audit-log destination failure must never break the request
+path.
 
 ## Tracing (Langfuse)
 

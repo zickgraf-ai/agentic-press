@@ -32,17 +32,31 @@ Future categories (bridge timeout, token-heavy session, stale setup commands) pl
 
 ## Sweep
 
-Read audit log via stdin or `--input`:
+The cleanest workflow is to capture audit entries to a dedicated file via the proxy's `AUDIT_LOG_FILE` env var, then sweep that file. Synchronous writes mean no buffering surprises, and no need to filter pino diagnostics out of stdout.
 
 ```bash
-# pipe in the proxy's NDJSON audit stream
-cat audit.ndjson | npm run sweep-improvements
+# 1. start the proxy with AUDIT_LOG_FILE set (in your shell or .env)
+AUDIT_LOG_FILE=/tmp/proxy-audit.ndjson npm run dev
 
-# or read from a file
-npm run sweep-improvements -- --input audit.ndjson
+# 2. (in another terminal, after some traffic has flowed)
+npm run sweep-improvements -- --input /tmp/proxy-audit.ndjson
+```
 
+Without `AUDIT_LOG_FILE`, audit entries go to stdout interleaved with pino diagnostics. You can still sweep by filtering out the pino lines, but the dedicated-file path is recommended:
+
+```bash
+# legacy: pipe stdout through grep, then to sweep
+grep -v '"level":' /tmp/proxy-stdout.log | npm run sweep-improvements
+```
+
+Other options:
+
+```bash
 # specify directory and per-run cap (default 3)
 npm run sweep-improvements -- --dir .improvements --max 5
+
+# pipe directly via stdin (e.g., from a tail process)
+tail -f /tmp/proxy-audit.ndjson | npm run sweep-improvements
 ```
 
 Idempotent: re-running on the same day with the same evidence is a no-op (deterministic IDs from date + category + evidence key).
