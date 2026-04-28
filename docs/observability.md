@@ -12,7 +12,7 @@ See also: [`./architecture.md`](./architecture.md), [`./security.md`](./security
 | Surface  | Transport             | Status                 | Enabled by                                      |
 |----------|-----------------------|------------------------|-------------------------------------------------|
 | Logging  | pino JSON on stdout   | Implemented            | Always on; level via `LOG_LEVEL`                |
-| Audit    | NDJSON on stdout      | Implemented            | Always on (one line per tool call)              |
+| Audit    | NDJSON on stdout, or dedicated file | Implemented | Always on (one line per tool call); set `AUDIT_LOG_FILE` to redirect to a file with synchronous writes |
 | Tracing  | Langfuse SDK (HTTPS)  | Implemented            | `LANGFUSE_PUBLIC_KEY` + `LANGFUSE_SECRET_KEY`   |
 | Metrics  | Prometheus `/metrics` | Implemented            | `METRICS_PORT` (binds to `127.0.0.1` by default; override with `METRICS_BIND`) |
 | Dashboards | Grafana / Loki      | Partial                | Metrics scrape ready; no Alloy config shipped yet |
@@ -55,9 +55,9 @@ Standard fields:
 `src/mcp-proxy/logger.ts` writes audit entries directly as one JSON object per
 line (not pino-formatted). Every request emits exactly one entry with
 `timestamp`, `tool`, `args`, `status` (`allowed`, `blocked`, `flagged`,
-`error`), `flags`, `durationMs`, and optional `errorMessage`. The audit stream
-is the source of truth for who-called-what; the pino log is operator-facing
-diagnostics.
+`error`), `flags`, `durationMs`, `direction` (`request` | `response`), and
+optional `errorMessage`. The audit stream is the source of truth for
+who-called-what; the pino log is operator-facing diagnostics.
 
 #### Destination — `AUDIT_LOG_FILE`
 

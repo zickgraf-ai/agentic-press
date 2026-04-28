@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -165,7 +165,6 @@ describe("audit logger — file destination (AUDIT_LOG_FILE)", () => {
   it("appends to an existing file (preserves prior session entries)", () => {
     // Pre-populate the file with one line, then configure and write more.
     // Audit logs are append-only — operators may concatenate sessions.
-    const { writeFileSync } = require("node:fs");
     writeFileSync(logFile, '{"timestamp":"2026-04-27T00:00:00Z","tool":"Old","args":{},"status":"allowed","flags":[]}\n');
     configureAuditLog({ filePath: logFile });
     logAuditEntry(entry({ tool: "New" }));
@@ -220,10 +219,20 @@ describe("audit logger — file destination (AUDIT_LOG_FILE)", () => {
     // console.warn (equivalent to other observability fallback paths).
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     const stdoutSpy = vi.spyOn(process.stdout, "write").mockReturnValue(true);
-    configureAuditLog({ filePath: "/this/path/definitely/does/not/exist/audit.ndjson" });
+    const result = configureAuditLog({ filePath: "/this/path/definitely/does/not/exist/audit.ndjson" });
     logAuditEntry(entry({ tool: "Fallback" }));
 
+    expect(result).toBe(false); // signals fallback so caller doesn't lie in logs
     expect(warnSpy).toHaveBeenCalled();
     expect(stdoutSpy).toHaveBeenCalledOnce();
   });
+
+  it("returns true when file destination is successfully active", () => {
+    expect(configureAuditLog({ filePath: logFile })).toBe(true);
+  });
+
+  it("returns false when no filePath provided (stdout default)", () => {
+    expect(configureAuditLog({})).toBe(false);
+  });
+
 });
