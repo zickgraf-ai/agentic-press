@@ -9,6 +9,7 @@ import {
 } from "./mcp-proxy/transport.js";
 import { parseLogLevel } from "./types.js";
 import { childLogger } from "./logger.js";
+import { configureAuditLog, closeAuditLog } from "./mcp-proxy/logger.js";
 import { loadLangfuseConfig, loadMetricsConfig } from "./observability/config.js";
 import { createTracer, createNoopTracer, type Tracer } from "./observability/langfuse.js";
 import {
@@ -28,6 +29,27 @@ import {
 } from "./server-config.js";
 
 const log = childLogger("main");
+
+// AUDIT_LOG_FILE redirects audit entries to a dedicated file with synchronous
+// writes. Keeps audit data clean of pino diagnostic interleave and avoids the
+// stream-buffering / Ctrl+C race that loses entries when stdout is captured
+// to a file. When unset, audit entries continue to go to stdout (default
+// behaviour, fine for development).
+const auditLogFile = process.env.AUDIT_LOG_FILE?.trim();
+if (auditLogFile) {
+  const fileActive = configureAuditLog({ filePath: auditLogFile });
+  if (fileActive) {
+    log.info({ file: auditLogFile }, "Audit log writing to dedicated file");
+  } else {
+    // configureAuditLog already emitted a console.warn with the reason.
+    // Re-state at warn level through the structured logger so the failure
+    // is visible to operators ingesting JSON logs (Loki, ELK, CloudWatch).
+    log.warn(
+      { file: auditLogFile },
+      "AUDIT_LOG_FILE configured but file open failed — audit entries going to stdout"
+    );
+  }
+}
 
 const logLevel = parseLogLevel(process.env.LOG_LEVEL);
 const serverDefs = parseServerDefs(process.env.MCP_SERVERS);
@@ -213,6 +235,10 @@ function shutdown(signal: string) {
           log.error({ err: r.reason }, "Shutdown task failed");
         }
       }
+      // Flush + close audit log fd before exit so no entries are lost.
+      // Synchronous, idempotent — safe to call even when AUDIT_LOG_FILE
+      // wasn't configured.
+      closeAuditLog();
       process.exit(0);
     });
   });
