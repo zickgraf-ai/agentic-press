@@ -80,7 +80,11 @@ path.
 
 ## Tracing (Langfuse)
 
-Implemented in `src/observability/langfuse.ts` and `config.ts` (PR [#30](https://github.com/zickgraf-ai/agentic-press/pull/30)).
+Implemented in `src/observability/langfuse.ts` and `config.ts`. Originally
+shipped on Langfuse JS SDK v3 (PR [#30](https://github.com/zickgraf-ai/agentic-press/pull/30));
+upgraded to the OpenTelemetry-based v5 SDK packages (`@langfuse/tracing`,
+`@langfuse/client`, `@langfuse/otel`, `@opentelemetry/sdk-node`) along with
+trace enrichment in PR #49.
 
 ### Enabling
 
@@ -118,14 +122,33 @@ no-op tracer.
 ### Shape
 
 - **One trace per `/mcp` request.** Named `mcp.request:<toolName>`. Started
-  in the server handler as soon as the tool name is known.
-- **One span per pipeline decision.** Named `mcp.tool_call`, emitted on the
-  terminal decision for the request.
-- **Trace metadata**: `method`, `requestId` (JSON-RPC id), `correlationId`.
+  in the server handler as soon as the tool name is known. The trace
+  corresponds to a root OpenTelemetry observation in the v5 model.
+- **One span per pipeline decision.** A child observation named
+  `mcp.tool_call`, emitted on the terminal decision for the request and
+  ended immediately (point-in-time semantics — span() represents a stage
+  decision, not a long-running operation).
+- **Trace input**: `{ tool, requestId, method, correlationId }`. A whitelist
+  set by `server.ts` — never the raw `arguments` payload (the sanitizer's
+  threat model assumes those carry hostile content). Renders in the Langfuse
+  UI Input column for at-a-glance request identification.
+- **Trace output**: `{ outcome, ...context }` set at `end()`. Concrete
+  examples: `{outcome:"blocked", reason:"path_guard"}`,
+  `{outcome:"flagged", phase:"request", patterns:[...]}`,
+  `{outcome:"error", phase:"bridge_call"}`. Renders in the UI Output column.
+- **Trace tags**: `["status:<status>", "outcome:<outcome>"]` plus any
+  caller-provided initial tags. Use the Langfuse trace filter to slice by
+  status without cracking metadata.
+- **Trace metadata**: `method`, `requestId` (JSON-RPC id), `correlationId`,
+  plus `outcome` after end. OpenTelemetry resource attributes (host, process,
+  SDK version) are also attached automatically by `LangfuseSpanProcessor`.
 - **Span metadata**: `tool`, `status`, `durationMs`, `flags` (sanitizer
   pattern names when status is `flagged`).
-- **`sessionId`** is reserved in the API but not yet wired — see the comment
-  in `server.ts` and the `StartTraceParams` docstring.
+- **`sessionId` and `userId`** are reserved in `StartTraceParams` and propagate
+  to the trace as `session.id` and `user.id` respectively when set. Phase 1
+  leaves them undefined — Phase 2 multi-agent orchestration wires them from
+  the dispatched agent's identity, enabling per-agent grouping in the
+  Langfuse Sessions / Users views.
 
 | Stage outcome           | Span status | Trace end outcome |
 |-------------------------|-------------|-------------------|
@@ -142,28 +165,36 @@ no-op tracer.
 Observability must never break the request path. Three layers enforce that:
 
 1. `createNoopTracer()` is used whenever config is disabled. It never imports
-   the `langfuse` module, so Langfuse is a genuine optional dependency.
-2. The real tracer wraps every SDK call (`trace`, `span`, `update`,
-   `flushAsync`, `shutdownAsync`) in try/catch and logs at `warn`.
+   any `@langfuse/*` or `@opentelemetry/*` module, so observability is a
+   genuine optional dependency — a deployment without those packages installed
+   still works as long as Langfuse stays disabled.
+2. The real tracer wraps every SDK call (`startObservation`, child observation
+   creation, `update`, `end`, `flush`, `shutdown`, OTEL `sdk.shutdown`) in
+   try/catch and logs at `warn`. Each shutdown phase is wrapped independently
+   so a hang in OTEL flush never blocks a Langfuse client shutdown.
 3. The server additionally wraps every `span`/`end` call in `safeSpan` /
    `safeEnd` to defend against custom `Tracer` implementations.
 
-If Langfuse is unreachable mid-request, the SDK queues events in memory and
-retries on its own schedule. Individual failed calls log `span failed` /
-`end failed` / `startTrace failed` and are dropped silently from the
-operator's perspective. `end()` is idempotent at the `ActiveTrace` layer, so
-both the success and the defensive outer-catch paths can call it without
-risk of double-close. Trace flushing happens on shutdown via
-`tracer.shutdown()`.
+If Langfuse is unreachable mid-request, the OTEL `BatchSpanProcessor` inside
+`LangfuseSpanProcessor` queues spans in memory and retries export on its own
+schedule (this replaces v3's in-SDK retry behavior). Individual failed calls
+log `span failed` / `end failed` / `startTrace failed` and are dropped
+silently from the operator's perspective. `end()` is idempotent at the
+`ActiveTrace` layer, so both the success and the defensive outer-catch paths
+can call it without risk of double-close. Trace flushing happens on shutdown
+via `tracer.shutdown()`.
 
 ### Adding a traced operation
 
 1. Accept an `ActiveTrace` from the caller or start one via
-   `tracer.startTrace({ name, metadata })`.
+   `tracer.startTrace({ name, metadata, input?, sessionId?, userId?, tags? })`.
 2. Call `activeTrace.span({ tool, status, durationMs, flags })` on the
    terminal outcome of each stage.
-3. Call `activeTrace.end({ outcome, metadata? })` exactly once per trace.
-   Double-calls are safe but wasteful.
+3. Call `activeTrace.end({ outcome, output?, metadata? })` exactly once per
+   trace. Double-calls are safe but wasteful. Pass an `output` snapshot —
+   typically `{ outcome, ...context }` — so the Langfuse UI Output column
+   surfaces the terminal decision; an undefined `output` leaves the column
+   empty rather than rendering the literal string `"undefined"`.
 4. Never let a tracer exception escape. Use `safeSpan` / `safeEnd` patterns
    from `server.ts` when integrating new call sites.
 

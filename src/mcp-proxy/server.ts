@@ -269,6 +269,12 @@ export function createProxyServer(config: ProxyServerConfig): Express {
         activeTrace = tracer.startTrace({
           name: `mcp.request:${tool}`,
           metadata: { method, requestId, correlationId },
+          // Trace-level input snapshot. Whitelist of safe fields only — never
+          // include raw `arguments` (could carry injection text or PII per the
+          // sanitizer's threat model). Operators see this as the Input column
+          // in the Langfuse UI and use it to identify the request without
+          // exposing the payload that the sanitizer is meant to gate.
+          input: { tool, requestId, method, correlationId },
         });
       } catch (err) {
         reqLog.warn({ err }, "startTrace failed");
@@ -280,7 +286,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
       if (!allowResult.allowed) {
         audit(tool, toolArgs, "blocked", [], undefined, "request", "allowlist");
         safeSpan({ tool, status: "blocked", durationMs: Date.now() - start });
-        safeEnd({ outcome: "blocked" });
+        safeEnd({ outcome: "blocked", output: { outcome: "blocked", reason: "allowlist" } });
         res.json(jsonRpcError(requestId, -32600, allowResult.reason));
         return;
       }
@@ -291,7 +297,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
         const patternStrings = sanitizeResult.flags.map((f) => f.pattern);
         audit(tool, toolArgs, "flagged", sanitizeResult.flags);
         safeSpan({ tool, status: "flagged", durationMs: Date.now() - start, flags: patternStrings });
-        safeEnd({ outcome: "flagged" });
+        safeEnd({ outcome: "flagged", output: { outcome: "flagged", phase: "request", patterns: patternStrings } });
         res.json(
           jsonRpcError(
             requestId,
@@ -309,7 +315,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
         if (!pathResult.allowed) {
           audit(tool, toolArgs, "blocked", [], undefined, "request", "path_guard");
           safeSpan({ tool, status: "blocked", durationMs: Date.now() - start });
-          safeEnd({ outcome: "blocked" });
+          safeEnd({ outcome: "blocked", output: { outcome: "blocked", reason: "path_guard" } });
           res.json(jsonRpcError(requestId, -32600, `Blocked path: ${pathResult.reason}`));
           return;
         }
@@ -319,7 +325,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
       if (!bridge || !sortedRoutes) {
         audit(tool, toolArgs, "allowed");
         safeSpan({ tool, status: "allowed", durationMs: Date.now() - start });
-        safeEnd({ outcome: "allowed" });
+        safeEnd({ outcome: "allowed", output: { outcome: "allowed", note: "no_backend_configured" } });
         res.json(jsonRpcError(requestId, -32603, `No MCP backend configured for tool "${tool}"`));
         return;
       }
@@ -328,7 +334,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
       if (!serverName) {
         audit(tool, toolArgs, "blocked", [], undefined, "request", "no_route");
         safeSpan({ tool, status: "blocked", durationMs: Date.now() - start });
-        safeEnd({ outcome: "blocked" });
+        safeEnd({ outcome: "blocked", output: { outcome: "blocked", reason: "no_route" } });
         res.json(jsonRpcError(requestId, -32600, `No route configured for tool "${tool}"`));
         return;
       }
@@ -354,7 +360,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
             reqLog.error({ server: serverName, error: rawMessage }, "Response sanitizer threw");
             audit(tool, toolArgs, "error", [], rawMessage, "response");
             safeSpan({ tool, status: "error", durationMs: Date.now() - start });
-            safeEnd({ outcome: "error" });
+            safeEnd({ outcome: "error", output: { outcome: "error", phase: "response_sanitizer" } });
             res.json(
               jsonRpcError(
                 requestId,
@@ -369,7 +375,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
             const operatorSummary = `response sanitizer: ${patternStrings.join(", ")}`;
             audit(tool, toolArgs, "flagged", respFlags, operatorSummary, "response");
             safeSpan({ tool, status: "flagged", durationMs: Date.now() - start, flags: patternStrings });
-            safeEnd({ outcome: "flagged" });
+            safeEnd({ outcome: "flagged", output: { outcome: "flagged", phase: "response", patterns: patternStrings } });
             res.json(
               jsonRpcError(
                 requestId,
@@ -381,7 +387,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
           }
           audit(tool, toolArgs, "allowed", [], undefined, "response");
           safeSpan({ tool, status: "allowed", durationMs: Date.now() - start });
-          safeEnd({ outcome: "allowed" });
+          safeEnd({ outcome: "allowed", output: { outcome: "allowed" } });
           res.json({ jsonrpc: "2.0", id: requestId, result });
         })
         .catch((err) => {
@@ -416,7 +422,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
               "Upstream response exceeded size cap"
             );
             safeSpan({ tool, status: "blocked", durationMs: Date.now() - start });
-            safeEnd({ outcome: "blocked" });
+            safeEnd({ outcome: "blocked", output: { outcome: "blocked", reason: "size_cap" } });
             res.json(
               jsonRpcError(
                 requestId,
@@ -438,7 +444,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
             reqLog.error({ err: auditErr }, "Audit logging failed");
           }
           safeSpan({ tool, status: "error", durationMs: Date.now() - start });
-          safeEnd({ outcome: "error" });
+          safeEnd({ outcome: "error", output: { outcome: "error", phase: "bridge_call" } });
           res.json(jsonRpcError(requestId, -32603, genericInternalError(correlationId)));
         });
       return; // Response handled in promise callbacks
@@ -453,7 +459,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
       // Best-effort: close any in-flight trace so we never leak an open trace
       // across requests. end() is idempotent so double-ends are harmless.
       safeSpan({ tool: toolName ?? "<unknown>", status: "error", durationMs: Date.now() - start });
-      safeEnd({ outcome: "error" });
+      safeEnd({ outcome: "error", output: { outcome: "error", phase: "outer_catch" } });
       res.status(500).json(jsonRpcError(requestId, -32603, genericInternalError(correlationId)));
     }
   });

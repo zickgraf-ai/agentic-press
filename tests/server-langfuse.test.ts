@@ -122,11 +122,24 @@ describe("MCP proxy tracing wire-up", () => {
     expect(startArg.name).toContain("Read");
     expect(startArg.sessionId).toBeUndefined();
     expect(startArg.metadata).toEqual(expect.objectContaining({ requestId: 1, method: "tools/call" }));
+    // Reviewer I5: trace input is a sanitized whitelist set by server.ts.
+    // Asserting the shape here protects against silent regressions where
+    // someone strips the `input` arg or — worse — pushes raw `arguments`
+    // through (which would carry injection text or PII).
+    expect(startArg.input).toEqual(
+      expect.objectContaining({ tool: "Read", requestId: 1, method: "tools/call" })
+    );
+    expect(startArg.input).not.toHaveProperty("arguments");
+    expect(startArg.input).not.toHaveProperty("path");
     expect(tracer.span).toHaveBeenCalledTimes(1);
     expect(tracer.span.mock.calls[0]![0].status).toBe("allowed");
     expect(tracer.span.mock.calls[0]![0].tool).toBe("Read");
     expect(tracer.end).toHaveBeenCalledTimes(1);
     expect(tracer.end.mock.calls[0]![0].outcome).toBe("allowed");
+    // Output snapshot — the UI Output column.
+    expect(tracer.end.mock.calls[0]![0].output).toEqual(
+      expect.objectContaining({ outcome: "allowed" })
+    );
   });
 
   it("traces an allowlist-blocked call as blocked", async () => {
@@ -135,6 +148,13 @@ describe("MCP proxy tracing wire-up", () => {
     expect(tracer.span.mock.calls[0]![0].status).toBe("blocked");
     expect(tracer.end).toHaveBeenCalledTimes(1);
     expect(tracer.end.mock.calls[0]![0].outcome).toBe("blocked");
+    // Reviewer I5: block reason flows through `output.reason`. This is what
+    // surfaces in the Langfuse UI Output column for operators triaging
+    // blocks. Regression here would silently strip the diagnostic context.
+    expect(tracer.end.mock.calls[0]![0].output).toEqual({
+      outcome: "blocked",
+      reason: "allowlist",
+    });
   });
 
   it("traces a sanitizer-flagged call as flagged with concrete pattern strings (#I13)", async () => {
@@ -151,6 +171,17 @@ describe("MCP proxy tracing wire-up", () => {
     expect(meta.flags).toContain("ignore_instructions");
     expect(tracer.end).toHaveBeenCalledTimes(1);
     expect(tracer.end.mock.calls[0]![0].outcome).toBe("flagged");
+    // Reviewer I5: flagged outputs include the patterns array so the UI
+    // surfaces *which* injection rule fired, without re-leaking raw matched
+    // content (the patterns are pattern names, not the matched substrings).
+    const out = tracer.end.mock.calls[0]![0].output as Record<string, unknown>;
+    expect(out).toEqual(
+      expect.objectContaining({
+        outcome: "flagged",
+        phase: "request",
+        patterns: expect.arrayContaining(["ignore_instructions"]),
+      })
+    );
   });
 
   it("traces a path-guard block as blocked (#I7)", async () => {
