@@ -175,22 +175,26 @@ Observability must never break the request path. Three layers enforce that:
 3. The server additionally wraps every `span`/`end` call in `safeSpan` /
    `safeEnd` to defend against custom `Tracer` implementations.
 
-If Langfuse is unreachable mid-request, the SDK queues events in memory and
-retries on its own schedule. Individual failed calls log `span failed` /
-`end failed` / `startTrace failed` and are dropped silently from the
-operator's perspective. `end()` is idempotent at the `ActiveTrace` layer, so
-both the success and the defensive outer-catch paths can call it without
-risk of double-close. Trace flushing happens on shutdown via
-`tracer.shutdown()`.
+If Langfuse is unreachable mid-request, the OTEL `BatchSpanProcessor` inside
+`LangfuseSpanProcessor` queues spans in memory and retries export on its own
+schedule (this replaces v3's in-SDK retry behavior). Individual failed calls
+log `span failed` / `end failed` / `startTrace failed` and are dropped
+silently from the operator's perspective. `end()` is idempotent at the
+`ActiveTrace` layer, so both the success and the defensive outer-catch paths
+can call it without risk of double-close. Trace flushing happens on shutdown
+via `tracer.shutdown()`.
 
 ### Adding a traced operation
 
 1. Accept an `ActiveTrace` from the caller or start one via
-   `tracer.startTrace({ name, metadata })`.
+   `tracer.startTrace({ name, metadata, input?, sessionId?, userId?, tags? })`.
 2. Call `activeTrace.span({ tool, status, durationMs, flags })` on the
    terminal outcome of each stage.
-3. Call `activeTrace.end({ outcome, metadata? })` exactly once per trace.
-   Double-calls are safe but wasteful.
+3. Call `activeTrace.end({ outcome, output?, metadata? })` exactly once per
+   trace. Double-calls are safe but wasteful. Pass an `output` snapshot —
+   typically `{ outcome, ...context }` — so the Langfuse UI Output column
+   surfaces the terminal decision; an undefined `output` leaves the column
+   empty rather than rendering the literal string `"undefined"`.
 4. Never let a tracer exception escape. Use `safeSpan` / `safeEnd` patterns
    from `server.ts` when integrating new call sites.
 

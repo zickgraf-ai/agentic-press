@@ -66,10 +66,15 @@ vi.mock("@langfuse/otel", () => otelFactory());
 
 const sdkNodeStart = vi.fn();
 const sdkNodeShutdown = vi.fn(async () => {});
+// _tracerProvider is private API on NodeSDK. We read it directly because the
+// public `@opentelemetry/api` `trace.getTracerProvider()` returns a
+// `ProxyTracerProvider` that does not work with `setLangfuseTracerProvider`
+// — see the long comment in src/observability/langfuse.ts for rationale.
+let nodeSDKTracerProvider: unknown = { __sentinel: "tracerProvider" };
 const NodeSDKCtor = vi.fn(function (this: any) {
   this.start = sdkNodeStart;
   this.shutdown = sdkNodeShutdown;
-  this._tracerProvider = { __sentinel: "tracerProvider" };
+  this._tracerProvider = nodeSDKTracerProvider;
 });
 const sdkNodeFactory = vi.fn(() => ({ NodeSDK: NodeSDKCtor }));
 vi.mock("@opentelemetry/sdk-node", () => sdkNodeFactory());
@@ -112,12 +117,14 @@ beforeEach(() => {
   NodeSDKCtor.mockClear();
   sdkNodeStart.mockReset();
   sdkNodeShutdown.mockReset().mockResolvedValue(undefined);
+  nodeSDKTracerProvider = { __sentinel: "tracerProvider" };
   tracingFactory.mockClear();
   clientFactory.mockClear();
   otelFactory.mockClear();
   sdkNodeFactory.mockClear();
   coreFactory.mockClear();
   mockLogger.warn.mockClear();
+  mockLogger.debug.mockClear();
 });
 
 describe("createTracer (no-op mode)", () => {
@@ -171,6 +178,13 @@ describe("createTracer (enabled mode)", () => {
     expect(NodeSDKCtor).toHaveBeenCalledTimes(1);
     expect(sdkNodeStart).toHaveBeenCalledTimes(1);
     expect(setLangfuseTracerProvider).toHaveBeenCalledTimes(1);
+    // We read NodeSDK's private `_tracerProvider` field directly because the
+    // public `@opentelemetry/api` getTracerProvider returns a wrapper that
+    // doesn't work with setLangfuseTracerProvider. See the long comment in
+    // src/observability/langfuse.ts for the empirical rationale (reviewer C2).
+    expect(setLangfuseTracerProvider).toHaveBeenCalledWith(
+      expect.objectContaining({ __sentinel: "tracerProvider" })
+    );
     expect(LangfuseClientCtor).toHaveBeenCalledWith(
       expect.objectContaining({
         publicKey: "pk-test",
@@ -299,6 +313,16 @@ describe("createTracer (enabled mode)", () => {
     expect(langfuseClientFlush).toHaveBeenCalledTimes(1);
   });
 
+  // Reviewer I4: standalone flush() is called from the SIGTERM handler outside
+  // shutdown(); a rejection there must be swallowed and warn-logged so the
+  // process exit isn't blocked by a Langfuse network hiccup.
+  it("flush swallows LangfuseClient.flush rejections (no propagation, warn logged)", async () => {
+    langfuseClientFlush.mockRejectedValueOnce(new Error("network timeout"));
+    const tracer = await createTracer(enabledConfig);
+    await expect(tracer.flush()).resolves.toBeUndefined();
+    expect(mockLogger.warn).toHaveBeenCalled();
+  });
+
   it("shutdown flushes the client, shuts down the OTEL SDK, then shuts down the client", async () => {
     const order: string[] = [];
     langfuseClientFlush.mockImplementationOnce(async () => {
@@ -320,6 +344,138 @@ describe("createTracer (enabled mode)", () => {
     const tracer = await createTracer(enabledConfig);
     await expect(tracer.shutdown()).resolves.toBeUndefined();
     expect(mockLogger.warn).toHaveBeenCalled();
+  });
+
+  // Reviewer I2: each shutdown phase must time out independently so a single
+  // hanging upstream cannot starve later phases of the global shutdown budget.
+  it("shutdown phases have independent timeouts — a hanging client.flush does not block sdk.shutdown", async () => {
+    let sdkShutdownStarted = false;
+    // client.flush hangs forever (resolved by the per-phase timeout).
+    langfuseClientFlush.mockImplementationOnce(() => new Promise(() => {}));
+    // sdk.shutdown should still run after the flush phase times out.
+    sdkNodeShutdown.mockImplementationOnce(async () => {
+      sdkShutdownStarted = true;
+    });
+    const tracer = await createTracer(enabledConfig);
+    // Wrap with our own outer timeout so a regression hanging both phases
+    // doesn't make this test stall the whole suite.
+    await Promise.race([
+      tracer.shutdown(),
+      new Promise((_, rej) => setTimeout(() => rej(new Error("test outer timeout")), 5000)),
+    ]);
+    expect(sdkShutdownStarted).toBe(true);
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ timeoutMs: expect.any(Number) }),
+      expect.stringContaining("client.flush timed out")
+    );
+  });
+
+  // Reviewer I1: silent loss of trace enrichment if the SDK runtime shape
+  // diverges (no otelSpan on the root observation). Warn ONCE per process so
+  // the per-request hot path stays quiet but operators get a signal.
+  it("warns once if rootObs.otelSpan is undefined (SDK shape divergence — silent enrichment loss otherwise)", async () => {
+    startObservation.mockImplementation(() => ({
+      update: rootObsUpdate,
+      end: rootObsEnd,
+      startObservation: startChildObservation,
+      // otelSpan deliberately undefined.
+    }));
+    const tracer = await createTracer(enabledConfig);
+    tracer.startTrace({ name: "mcp.request:A" });
+    tracer.startTrace({ name: "mcp.request:B" });
+    tracer.startTrace({ name: "mcp.request:C" });
+    const matching = mockLogger.warn.mock.calls.filter((c) =>
+      typeof c[0] === "string"
+        ? c[0].includes("rootObs.otelSpan is undefined")
+        : typeof c[1] === "string" && c[1].includes("rootObs.otelSpan is undefined")
+    );
+    expect(matching).toHaveLength(1);
+  });
+
+  // Reviewer C2 (warn fallback): if a future @opentelemetry/sdk-node release
+  // renames or removes the private `_tracerProvider` field, the wrapper must
+  // warn loudly rather than silently lose all traces. The "use the public
+  // OTEL API" half of the C2 advice was infeasible (returns a hollow proxy);
+  // the warn fallback is the practical defense.
+  it("warns when NodeSDK._tracerProvider is undefined (private field absent — silent ingestion failure otherwise)", async () => {
+    nodeSDKTracerProvider = undefined;
+    await createTracer(enabledConfig);
+    const matching = mockLogger.warn.mock.calls.filter((c) =>
+      typeof c[0] === "string" && c[0].includes("NodeSDK._tracerProvider is undefined")
+    );
+    expect(matching).toHaveLength(1);
+  });
+
+  // Reviewer C3: a partial failure inside end() must leave `ended = false`
+  // so a subsequent retry from server.ts's outer catch can attempt cleanup.
+  // OTEL span.end() is idempotent so the retry is safe.
+  it("end leaves ended=false when rootObs.update throws — retry path is intact", async () => {
+    rootObsUpdate.mockImplementationOnce(() => {
+      throw new Error("update boom");
+    });
+    const tracer = await createTracer(enabledConfig);
+    const active = tracer.startTrace({ name: "mcp.request:Read" });
+    active.end({ outcome: "error" });
+    // First call failed inside the try; second call should still attempt the
+    // SDK calls (which now succeed) — proves ended was NOT prematurely flipped.
+    rootObsUpdate.mockImplementationOnce(() => {});
+    active.end({ outcome: "error" });
+    // Two attempts total at update; rootObs.end called once on the successful retry.
+    expect(rootObsUpdate).toHaveBeenCalledTimes(2);
+    expect(rootObsEnd).toHaveBeenCalledTimes(1);
+  });
+
+  // Reviewer S8: end() without an output param must NOT set TRACE_OUTPUT —
+  // the guard prevents the literal string "undefined" from appearing in the UI.
+  it("end without output does not set TRACE_OUTPUT", async () => {
+    const tracer = await createTracer(enabledConfig);
+    const active = tracer.startTrace({ name: "mcp.request:Read" });
+    active.end({ outcome: "allowed" });
+    const outputCalls = otelSpanSetAttribute.mock.calls.filter((c) => c[0] === "MOCK_TRACE_OUTPUT");
+    expect(outputCalls).toHaveLength(0);
+  });
+});
+
+// Reviewer I3: safeSerialize is the safety net for OTEL attribute values.
+// All three branches need coverage so a future refactor that removes the
+// try/catch (or the string-passthrough) is caught by tests.
+describe("safeSerialize behavior (via TRACE_INPUT roundtrip)", () => {
+  const enabledConfig = {
+    enabled: true as const,
+    publicKey: "pk",
+    secretKey: "sk",
+    host: "https://us.cloud.langfuse.com",
+  };
+
+  it("string passthrough — TRACE_INPUT receives the literal string unchanged", async () => {
+    const tracer = await createTracer(enabledConfig);
+    tracer.startTrace({ name: "x", input: "hello world" });
+    expect(otelSpanSetAttribute).toHaveBeenCalledWith("MOCK_TRACE_INPUT", "hello world");
+  });
+
+  it("object input — TRACE_INPUT receives JSON.stringify output", async () => {
+    const tracer = await createTracer(enabledConfig);
+    tracer.startTrace({ name: "x", input: { tool: "Read", requestId: 42 } });
+    expect(otelSpanSetAttribute).toHaveBeenCalledWith(
+      "MOCK_TRACE_INPUT",
+      JSON.stringify({ tool: "Read", requestId: 42 })
+    );
+  });
+
+  it("circular reference — TRACE_INPUT falls back to [unserializable] without throwing", async () => {
+    const circular: Record<string, unknown> = { a: 1 };
+    circular.self = circular;
+    const tracer = await createTracer(enabledConfig);
+    expect(() => tracer.startTrace({ name: "x", input: circular })).not.toThrow();
+    expect(otelSpanSetAttribute).toHaveBeenCalledWith("MOCK_TRACE_INPUT", "[unserializable]");
+  });
+
+  it("BigInt — TRACE_INPUT falls back to [unserializable] without throwing", async () => {
+    const tracer = await createTracer(enabledConfig);
+    expect(() =>
+      tracer.startTrace({ name: "x", input: { count: BigInt("9007199254740993") } })
+    ).not.toThrow();
+    expect(otelSpanSetAttribute).toHaveBeenCalledWith("MOCK_TRACE_INPUT", "[unserializable]");
   });
 });
 

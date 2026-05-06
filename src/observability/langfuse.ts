@@ -16,9 +16,9 @@ import type { NodeSDK as NodeSDKType } from "@opentelemetry/sdk-node";
  * is enforced by construction:
  *
  *   - You cannot call `span()` or `end()` without first calling `startTrace`.
- *   - `end()` is idempotent — the underlying SDK's update is called at most
- *     once, so accidental double-ends (e.g. a deep success branch plus a
- *     defensive outer catch) are safe.
+ *   - `end()` is idempotent — the underlying SDK's `update`/`end` are called
+ *     at most once on success, so accidental double-ends (e.g. a deep success
+ *     branch plus a defensive outer catch) are safe.
  *   - `span()` and `end()` each catch their own exceptions internally. A
  *     misbehaving tracer cannot surface an error back into the request path.
  *
@@ -56,8 +56,10 @@ export interface StartTraceParams {
    */
   readonly input?: unknown;
   /**
-   * Initial trace tags. The wrapper appends `[status]` (and `blockReason` when
-   * relevant) at end() time so operators can filter by outcome.
+   * Initial trace tags. The wrapper appends `status:<status>` (set when
+   * `span()` is called) and `outcome:<outcome>` (set when `end()` is called)
+   * so operators can filter traces by pipeline outcome without cracking
+   * metadata.
    */
   readonly tags?: readonly string[];
 }
@@ -112,6 +114,24 @@ export function getNoopActiveTrace(): ActiveTrace {
 }
 
 /**
+ * Runtime adapter type for the v5 `LangfuseSpan`. Consolidates the assumptions
+ * about the SDK's runtime shape into a single place so an upstream change
+ * surfaces as one type compile error rather than 15 silent runtime failures
+ * scattered across the wrapper. Reviewer suggestion S1.
+ */
+interface LangfuseSpanRuntime {
+  readonly otelSpan?: { setAttribute(key: string, value: unknown): void };
+  startObservation(name: string, attrs: Record<string, unknown>): LangfuseSpanRuntime;
+  update(attrs: Record<string, unknown>): void;
+  end(): void;
+}
+
+interface LangfuseClientRuntime {
+  flush(): Promise<void>;
+  shutdown(): Promise<void>;
+}
+
+/**
  * Build a tracer from a LangfuseConfig.
  *
  * Design note: `createTracer` is async so the v5 SDK packages are loaded via
@@ -123,8 +143,8 @@ export function getNoopActiveTrace(): ActiveTrace {
  * v5 SDK changes (versus v3):
  *   - The `langfuse` package is replaced by `@langfuse/tracing` (observation
  *     creation), `@langfuse/client` (lifecycle: flush/shutdown, scoring,
- *     prompts), and `@langfuse/otel` (the `LangfuseSpanProcessor` that
- *     uploads observations to Langfuse).
+ *     prompts), `@langfuse/otel` (the `LangfuseSpanProcessor`), and
+ *     `@langfuse/core` (the OTEL attribute key registry).
  *   - Tracing is OpenTelemetry-based — the SDK requires a registered OTEL
  *     `NodeSDK`. We register one inside this function so consumers don't
  *     need to know about OTEL.
@@ -148,11 +168,10 @@ export async function createTracer(config: LangfuseConfig): Promise<Tracer> {
   const clientModule = await import("@langfuse/client");
   const otelModule = await import("@langfuse/otel");
   const sdkNodeModule = await import("@opentelemetry/sdk-node");
+  // @langfuse/core exposes the OTEL attribute key registry that LangfuseSpanProcessor reads.
+  const coreModule = await import("@langfuse/core");
 
-  const {
-    startObservation,
-    setLangfuseTracerProvider,
-  } = tracingModule;
+  const { startObservation, setLangfuseTracerProvider } = tracingModule;
   const { LangfuseClient } = clientModule as {
     LangfuseClient: new (opts: { publicKey: string; secretKey: string; baseUrl: string }) => LangfuseClientType;
   };
@@ -163,7 +182,7 @@ export async function createTracer(config: LangfuseConfig): Promise<Tracer> {
   // span so they appear at the trace level in the Langfuse UI without
   // requiring a propagateAttributes() callback wrapper around the request
   // handler (which would force us to restructure server.ts).
-  const coreModule = (await import("@langfuse/core")) as {
+  const ATTR = (coreModule as {
     LangfuseOtelSpanAttributes: {
       TRACE_NAME: string;
       TRACE_USER_ID: string;
@@ -173,8 +192,7 @@ export async function createTracer(config: LangfuseConfig): Promise<Tracer> {
       TRACE_OUTPUT: string;
       TRACE_METADATA: string;
     };
-  };
-  const ATTR = coreModule.LangfuseOtelSpanAttributes;
+  }).LangfuseOtelSpanAttributes;
 
   // OTEL NodeSDK setup. The LangfuseSpanProcessor batches observations and
   // uploads them to Langfuse on flush/shutdown. Failure here means we cannot
@@ -190,10 +208,30 @@ export async function createTracer(config: LangfuseConfig): Promise<Tracer> {
   sdk.start();
 
   // Wire the SDK's tracer provider into @langfuse/tracing so startObservation()
-  // creates spans on our processor's pipeline.
+  // creates spans on our LangfuseSpanProcessor's pipeline.
+  //
+  // We considered using the public `trace.getTracerProvider()` from
+  // `@opentelemetry/api` (reviewer C2), but that returns a `ProxyTracerProvider`
+  // wrapper rather than the underlying `NodeTracerProvider` that the span
+  // processor was attached to. Passing the proxy to setLangfuseTracerProvider
+  // produces a hollow tracer and traces silently fail to reach Langfuse —
+  // verified empirically. There is no public method on ProxyTracerProvider
+  // to unwrap to the delegate.
+  //
+  // So we read NodeSDK's `_tracerProvider` field directly. The leading
+  // underscore signals this is private API; if @opentelemetry/sdk-node renames
+  // or removes it in a 0.x bump, we will warn LOUDLY instead of failing
+  // silently — operators see "spans will not reach Langfuse" in stdout
+  // immediately rather than discovering empty traces hours later.
   const provider = (sdk as unknown as { _tracerProvider?: unknown })._tracerProvider;
   if (provider) {
     setLangfuseTracerProvider(provider as Parameters<typeof setLangfuseTracerProvider>[0]);
+  } else {
+    log.warn(
+      "NodeSDK._tracerProvider is undefined — spans will not reach Langfuse. " +
+        "This may indicate an incompatible @opentelemetry/sdk-node version " +
+        "(this is a private field; check the upgrade path before bumping the SDK)."
+    );
   }
 
   // The client is only needed for lifecycle (flush, shutdown). Observation
@@ -202,20 +240,34 @@ export async function createTracer(config: LangfuseConfig): Promise<Tracer> {
     publicKey: config.publicKey,
     secretKey: config.secretKey,
     baseUrl: config.host,
-  });
+  }) as unknown as LangfuseClientRuntime;
+
+  // One-shot warning when the runtime SDK shape diverges from our adapter
+  // expectations (otelSpan is the only optional field in the adapter and
+  // the most common drift point). Keeps the per-request hot path silent.
+  let warnedMissingOtelSpan = false;
+  function maybeWarnMissingOtelSpan(rootObs: LangfuseSpanRuntime) {
+    if (!rootObs.otelSpan && !warnedMissingOtelSpan) {
+      log.warn(
+        "rootObs.otelSpan is undefined — trace enrichment (input/output/tags/sessionId/userId) " +
+          "will not be attached. This may indicate an incompatible @langfuse/tracing version."
+      );
+      warnedMissingOtelSpan = true;
+    }
+  }
 
   return {
     startTrace(params) {
-      let rootObs: LangfuseSpan | undefined;
+      let rootObs: LangfuseSpanRuntime | undefined;
       try {
         rootObs = startObservation(params.name, {
           input: params.input,
           metadata: params.metadata,
-        }) as LangfuseSpan;
+        }) as unknown as LangfuseSpanRuntime;
 
-        // Trace-level attributes go on the root observation's OTEL span.
-        // Langfuse's ingestion reads these keys and lifts them onto the trace.
-        const otelSpan = (rootObs as unknown as { otelSpan: { setAttribute: (k: string, v: unknown) => void } }).otelSpan;
+        maybeWarnMissingOtelSpan(rootObs);
+
+        const otelSpan = rootObs.otelSpan;
         if (otelSpan) {
           otelSpan.setAttribute(ATTR.TRACE_NAME, params.name);
           if (params.sessionId) otelSpan.setAttribute(ATTR.TRACE_SESSION_ID, params.sessionId);
@@ -235,7 +287,8 @@ export async function createTracer(config: LangfuseConfig): Promise<Tracer> {
       }
 
       let ended = false;
-      // Tags accumulated across span() calls; appended to TRACE_TAGS at end().
+      // Tags accumulated across span() and end() calls; written to TRACE_TAGS
+      // at end() time. Initial caller-provided tags seed the array.
       const accumulatedTags: string[] = params.tags ? [...params.tags] : [];
 
       const active: ActiveTrace = {
@@ -245,9 +298,7 @@ export async function createTracer(config: LangfuseConfig): Promise<Tracer> {
             // Create a child observation `mcp.tool_call` with stage decision
             // metadata, then end it immediately. This preserves the v3 trace
             // tree shape (root trace + one child span) operators expect.
-            const child = (rootObs as unknown as {
-              startObservation: (name: string, attrs: Record<string, unknown>) => LangfuseSpan;
-            }).startObservation("mcp.tool_call", {
+            const child = rootObs.startObservation("mcp.tool_call", {
               metadata: {
                 tool: spanParams.tool,
                 status: spanParams.status,
@@ -255,7 +306,7 @@ export async function createTracer(config: LangfuseConfig): Promise<Tracer> {
                 flags: spanParams.flags ?? [],
               },
             });
-            (child as unknown as { end: () => void }).end();
+            child.end();
             // Track the status as a tag on the trace.
             accumulatedTags.push(`status:${spanParams.status}`);
           } catch (err) {
@@ -264,17 +315,16 @@ export async function createTracer(config: LangfuseConfig): Promise<Tracer> {
         },
         end(endParams: EndTraceParams) {
           if (ended || !rootObs) return;
-          ended = true;
+          // C3 fix: only mark `ended` after the SDK calls succeed. If
+          // rootObs.update() succeeds but rootObs.end() throws, leaving
+          // `ended = false` allows server.ts's outer catch to retry; OTEL
+          // span.end() is idempotent so a retry is safe.
           try {
-            // Set output and outcome metadata on the root observation, plus
-            // the final tag set, then end the root.
-            (rootObs as unknown as {
-              update: (attrs: Record<string, unknown>) => void;
-            }).update({
+            rootObs.update({
               output: endParams.output,
               metadata: { outcome: endParams.outcome, ...(endParams.metadata ?? {}) },
             });
-            const otelSpan = (rootObs as unknown as { otelSpan: { setAttribute: (k: string, v: unknown) => void } }).otelSpan;
+            const otelSpan = rootObs.otelSpan;
             if (otelSpan) {
               accumulatedTags.push(`outcome:${endParams.outcome}`);
               otelSpan.setAttribute(ATTR.TRACE_TAGS, JSON.stringify(accumulatedTags));
@@ -282,7 +332,8 @@ export async function createTracer(config: LangfuseConfig): Promise<Tracer> {
                 otelSpan.setAttribute(ATTR.TRACE_OUTPUT, safeSerialize(endParams.output));
               }
             }
-            (rootObs as unknown as { end: () => void }).end();
+            rootObs.end();
+            ended = true;
           } catch (err) {
             log.warn({ err }, "end failed");
           }
@@ -292,44 +343,76 @@ export async function createTracer(config: LangfuseConfig): Promise<Tracer> {
     },
     async flush() {
       try {
-        await (client as unknown as { flush: () => Promise<void> }).flush();
+        await client.flush();
       } catch (err) {
         log.warn({ err }, "flush failed");
       }
     },
     async shutdown() {
-      // Order matters: flush the LangfuseClient first, then shut down OTEL so
-      // the span processor exports any pending observations before its
-      // queues are torn down.
-      try {
-        await (client as unknown as { flush: () => Promise<void> }).flush();
-      } catch (err) {
-        log.warn({ err }, "client flush failed during shutdown");
-      }
-      try {
-        await sdk.shutdown();
-      } catch (err) {
-        log.warn({ err }, "OTEL sdk shutdown failed");
-      }
-      try {
-        await (client as unknown as { shutdown: () => Promise<void> }).shutdown();
-      } catch (err) {
-        log.warn({ err }, "client shutdown failed");
-      }
+      // Order matters: (1) client.flush() pushes any client-buffered data;
+      // (2) sdk.shutdown() force-flushes the OTEL span processor's queue so
+      // pending spans reach Langfuse before exit; (3) client.shutdown() closes
+      // the LangfuseClient. Each phase has its own per-call timeout so a
+      // single hanging upstream cannot starve later phases of the caller's
+      // global shutdown budget (reviewer I2). 1s per phase is generous for
+      // a healthy network and tight enough that the global 3s window in
+      // src/index.ts still has headroom for the other observability layers.
+      await raceWithTimeout(
+        client.flush().catch((err) => log.warn({ err }, "client.flush failed during shutdown")),
+        1000,
+        "client.flush timed out during shutdown"
+      );
+      await raceWithTimeout(
+        sdk.shutdown().catch((err) => log.warn({ err }, "OTEL sdk.shutdown failed")),
+        1000,
+        "OTEL sdk.shutdown timed out"
+      );
+      await raceWithTimeout(
+        client.shutdown().catch((err) => log.warn({ err }, "client.shutdown failed")),
+        1000,
+        "client.shutdown timed out"
+      );
     },
   };
 }
 
 /**
  * Best-effort serialization for OTEL attribute values, which must be primitives
- * or arrays of primitives. Objects get JSON.stringify; failures fall through
- * to a string marker so a non-serializable value never breaks the trace path.
+ * or arrays of primitives. Strings pass through unchanged; objects get
+ * JSON.stringify; circular refs / BigInts / non-serializable values fall
+ * through to a string marker so a non-serializable value never breaks the
+ * trace path.
  */
 function safeSerialize(value: unknown): string {
   if (typeof value === "string") return value;
   try {
     return JSON.stringify(value);
-  } catch {
+  } catch (err) {
+    // Reviewer S2: log at debug level so operators have breadcrumbs but the
+    // request path stays quiet for the common case.
+    log.debug({ err }, "safeSerialize: JSON.stringify failed");
     return "[unserializable]";
+  }
+}
+
+/**
+ * Race a promise against a timeout. Resolves on whichever finishes first; if
+ * the timeout fires first, logs a warning and resolves so the caller is not
+ * blocked. Used in shutdown to bound each phase independently — a single
+ * hanging upstream must not starve later phases of the global shutdown budget.
+ */
+async function raceWithTimeout<T>(p: Promise<T>, ms: number, message: string): Promise<void> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<void>((resolve) => {
+    timer = setTimeout(() => {
+      log.warn({ timeoutMs: ms }, message);
+      resolve();
+    }, ms);
+    timer.unref();
+  });
+  try {
+    await Promise.race([p, timeout]);
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
