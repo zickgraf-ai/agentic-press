@@ -87,12 +87,33 @@ Implemented in `src/observability/langfuse.ts` and `config.ts` (PR [#30](https:/
 ```dotenv
 LANGFUSE_PUBLIC_KEY=pk-...
 LANGFUSE_SECRET_KEY=sk-...
-LANGFUSE_HOST=https://cloud.langfuse.com
+LANGFUSE_HOST=https://us.cloud.langfuse.com
 ```
 
-`LANGFUSE_HOST` is optional and defaults to Langfuse Cloud. Both keys must be
-present; setting only one is treated as a misconfiguration and logs a warning
-via the `langfuse` child logger, then falls back to the no-op tracer.
+Langfuse Cloud is split into regions and **`LANGFUSE_HOST` must match the
+region your project lives in**:
+
+- US Cloud: `https://us.cloud.langfuse.com`
+- EU Cloud: `https://cloud.langfuse.com` (also `https://eu.cloud.langfuse.com`)
+- Self-hosted: your deployment's URL
+
+If `LANGFUSE_HOST` is unset, the SDK defaults to the EU host. Keys generated
+in a US project will silently fail authentication against the EU host —
+the SDK swallows the upload error and traces never appear in the UI.
+To diagnose region mismatch:
+
+```bash
+curl -s -o /dev/null -w "HTTP %{http_code}\n" \
+  -u "$LANGFUSE_PUBLIC_KEY:$LANGFUSE_SECRET_KEY" \
+  https://us.cloud.langfuse.com/api/public/projects
+```
+
+A `200` confirms the region matches your keys; a `401` says the keys belong
+to a different region. Repeat against `cloud.langfuse.com` for EU.
+
+Both keys must be present; setting only one is treated as a misconfiguration
+and logs a warning via the `langfuse` child logger, then falls back to the
+no-op tracer.
 
 ### Shape
 
