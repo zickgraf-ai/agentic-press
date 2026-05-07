@@ -215,6 +215,13 @@ export function createProxyServer(config: ProxyServerConfig): Express {
     let requestId: number | string | null = null; // Hoisted for catch block (#N-3)
     let toolName: string | undefined; // Hoisted so outer catch can emit a span (#C2)
     let activeTrace: ActiveTrace | undefined;
+    // Tier 1.2 (#53): hoisted so the closure-captured `audit()` and the
+    // outer-catch path both see the same identity values. Both remain
+    // undefined until the headers are parsed in the try block; an exception
+    // thrown before that (e.g. malformed JSON-RPC envelope) just produces
+    // an audit entry without identity, which is correct.
+    let sessionId: string | undefined;
+    let agentType: string | undefined;
 
     // Belt-and-braces defense around ActiveTrace calls. The enabled langfuse
     // tracer already isolates SDK errors inside span/end — but a custom
@@ -253,7 +260,11 @@ export function createProxyServer(config: ProxyServerConfig): Express {
       // The block-reason label still distinguishes WHY it was blocked.
       const toolLabel = entry.status === "blocked" ? "_blocked" : entry.tool;
       try {
-        recorder.recordRequest(toolLabel, entry.status, entry.durationMs ?? 0);
+        // Tier 1.2 (#53): pass entry.agentType through as a Prometheus label.
+        // The recorder maps undefined → AGENT_TYPE_UNSPECIFIED so every series
+        // carries the same label set regardless of whether the identity
+        // header was sent.
+        recorder.recordRequest(toolLabel, entry.status, entry.durationMs ?? 0, entry.agentType);
       } catch (err) {
         reqLog.warn({ err }, "recorder.recordRequest threw (ignored)");
       }
@@ -292,6 +303,12 @@ export function createProxyServer(config: ProxyServerConfig): Express {
         durationMs: Date.now() - start,
         direction,
         ...(errorMessage !== undefined ? { errorMessage } : {}),
+        // Tier 1.2 (#53): identity captured from headers earlier in the
+        // request, propagated to every audit entry so downstream consumers
+        // (NDJSON readers, MC, Prometheus) demux per-agent. Optional —
+        // when no headers are sent, the entry shape matches Phase 1 exactly.
+        ...(sessionId !== undefined ? { sessionId } : {}),
+        ...(agentType !== undefined ? { agentType } : {}),
       };
       logAuditEntry(entry);
       safeEmit(entry);
@@ -321,14 +338,15 @@ export function createProxyServer(config: ProxyServerConfig): Express {
 
       // Phase 2 Tier 1.1: extract identity headers. Both are optional; missing
       // → undefined preserves Phase 1 behaviour. Malformed → warn-log + undefined
-      // (must never 400-reject, #C5).
-      const sessionId = parseIdentityHeader(
+      // (must never 400-reject, #C5). Assign to the hoisted closure variables
+      // so the audit() helper and outer-catch path see the same identity.
+      sessionId = parseIdentityHeader(
         req.header("x-agent-session-id"),
         "X-Agent-Session-Id",
         SESSION_ID_MAX_LEN,
         reqLog
       );
-      const agentType = parseIdentityHeader(
+      agentType = parseIdentityHeader(
         req.header("x-agent-type"),
         "X-Agent-Type",
         AGENT_TYPE_MAX_LEN,

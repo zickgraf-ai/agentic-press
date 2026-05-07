@@ -20,7 +20,22 @@ export interface ActivityEvent {
   readonly durationMs?: number;
   readonly flags?: readonly string[];
   readonly errorMessage?: string;
+  /**
+   * Phase 2 Tier 1.2 (#53): per-agent identity. Both optional. When set,
+   * `agentType` becomes MC's `agent_name` so the Tasks / Activity panels can
+   * demultiplex per agent role; `sessionId` is included in the event payload
+   * so MC can group activity by session.
+   */
+  readonly sessionId?: string;
+  readonly agentType?: string;
 }
+
+/**
+ * Default agent name MC sees when an event has no agentType. Kept here as a
+ * single export so the upcoming MC connection adapter (Tier 2.A) can register
+ * with the same name and the kanban board attribution stays consistent.
+ */
+export const DEFAULT_AGENT_NAME = "agentic-press-proxy";
 
 export interface DashboardAdapter {
   registerSession(sandboxName: SandboxId, taskDescription?: string): Promise<DashboardSession>;
@@ -127,12 +142,21 @@ export function createMissionControlAdapter(
       // MC's /api/hermes/events is the write endpoint for agent lifecycle
       // events — it persists to the activities table and broadcasts via SSE.
       // /api/activities is read-only (405 on POST).
+      //
+      // Tier 1.2 identity propagation:
+      //   - agent_name uses event.agentType when set so MC's panels show
+      //     per-role activity (e.g. all "reviewer" activity grouped). Falls
+      //     back to DEFAULT_AGENT_NAME when no agent type was passed —
+      //     preserves Phase 1 behaviour for headerless callers.
+      //   - data.session_id carries event.sessionId when set so MC can group
+      //     events by task/session in its Activity views. Omitted entirely
+      //     when absent (no `session_id: undefined` noise).
       await safeFetch(`${config.url}/api/hermes/events`, {
         method: "POST",
         headers: headers(),
         body: JSON.stringify({
           event: `tool:${event.type}`,
-          agent_name: "agentic-press-proxy",
+          agent_name: event.agentType ?? DEFAULT_AGENT_NAME,
           source: "mcp-proxy",
           timestamp: event.timestamp,
           data: {
@@ -141,6 +165,7 @@ export function createMissionControlAdapter(
             durationMs: event.durationMs,
             flags: event.flags,
             errorMessage: event.errorMessage,
+            ...(event.sessionId !== undefined ? { session_id: event.sessionId } : {}),
           },
         }),
       });

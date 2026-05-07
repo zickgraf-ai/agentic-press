@@ -24,6 +24,16 @@ export interface AuditEntry {
    * Error object or stack trace).
    */
   readonly errorMessage?: string;
+  /**
+   * Phase 2 Tier 1.2 (#53): per-agent identity propagated from
+   * X-Agent-Session-Id / X-Agent-Type request headers. Both optional so
+   * existing single-agent callers and existing audit-log consumers keep
+   * working unchanged. Charset and length are already validated upstream
+   * by the proxy's identity-header parser; the audit log is never the
+   * source of truth for identity-header schema, just a downstream consumer.
+   */
+  readonly sessionId?: string;
+  readonly agentType?: string;
 }
 
 /**

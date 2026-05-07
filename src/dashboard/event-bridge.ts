@@ -64,6 +64,11 @@ export function createEventBridge(adapter: DashboardAdapter): EventBridge {
         ? { flags: entry.flags.map((f) => f.pattern) }
         : {}),
       ...(entry.errorMessage ? { errorMessage: entry.errorMessage } : {}),
+      // Phase 2 Tier 1.2 (#53): identity propagation. Optional in both
+      // directions — when AuditEntry has neither, ActivityEvent omits both,
+      // so the MC POST body keeps its Phase 1 shape exactly.
+      ...(entry.sessionId !== undefined ? { sessionId: entry.sessionId } : {}),
+      ...(entry.agentType !== undefined ? { agentType: entry.agentType } : {}),
     };
 
     const p = adapter.pushActivity(event).catch((err) => {
