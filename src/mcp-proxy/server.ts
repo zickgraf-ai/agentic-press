@@ -21,6 +21,54 @@ import { createNoopRecorder, type MetricsRecorder, type BlockReason } from "../o
 
 const log = childLogger("mcp-proxy");
 
+/**
+ * Identity headers (Phase 2 Tier 1.1).
+ *
+ * The proxy accepts two optional headers on /mcp that identify the calling
+ * agent so observability surfaces (Langfuse traces; later: audit, metrics,
+ * dashboard events) can demultiplex per-agent. Both are operator-controlled
+ * — the dispatch CLI / Mission Control connector sets them when launching a
+ * sandbox. Sandboxes never set them themselves.
+ *
+ *   X-Agent-Session-Id  — opaque session label, max 128 chars, [A-Za-z0-9._-]+
+ *   X-Agent-Type        — short agent role (e.g. "reviewer"), max 32 chars
+ *
+ * Charset is restricted so the values are safe to use as Prometheus label
+ * values, OTEL span attribute keys, and audit-log fields without further
+ * escaping. The bound is also a cardinality defence: operator-controlled but
+ * still bounded so a misbehaving caller cannot blow up the Prometheus
+ * registry. Both headers are OPTIONAL; missing → undefined → request behaves
+ * exactly as in Phase 1.
+ *
+ * Malformed values warn-log and fall through to undefined. Identity-header
+ * parsing must NEVER reject a request (anchor #5: observability/identity
+ * issues never break the request path). A misconfigured caller still gets
+ * its tool call processed; the operator sees the warning and fixes the
+ * caller.
+ */
+const IDENTITY_VALUE_PATTERN = /^[A-Za-z0-9._-]+$/;
+const SESSION_ID_MAX_LEN = 128;
+const AGENT_TYPE_MAX_LEN = 32;
+
+type WarnLogger = { warn: (obj: Record<string, unknown>, msg: string) => void };
+
+function parseIdentityHeader(
+  raw: string | undefined,
+  headerName: string,
+  maxLen: number,
+  reqLog: WarnLogger
+): string | undefined {
+  if (raw === undefined) return undefined;
+  if (raw.length === 0 || raw.length > maxLen || !IDENTITY_VALUE_PATTERN.test(raw)) {
+    reqLog.warn(
+      { header: headerName, length: raw.length, maxLen },
+      "identity header malformed — ignored, request will be processed without identity"
+    );
+    return undefined;
+  }
+  return raw;
+}
+
 export interface ProxyServerConfig {
   readonly port: number;
   readonly allowedTools: readonly string[];
@@ -256,10 +304,33 @@ export function createProxyServer(config: ProxyServerConfig): Express {
       const tool = toolName; // Narrowed alias for use inside async callbacks
       const toolArgs = (params.arguments ?? {}) as Record<string, unknown>;
 
-      // Start the trace once we know which tool was requested. Note: sessionId
-      // is intentionally omitted — there is no real session concept yet, and
-      // per-request JSON-RPC ids would defeat Langfuse's session grouping. The
-      // request id travels in metadata so it is still searchable.
+      // Phase 2 Tier 1.1: extract identity headers. Both are optional; missing
+      // → undefined preserves Phase 1 behaviour. Malformed → warn-log + undefined
+      // (must never 400-reject, anchor #5).
+      const sessionId = parseIdentityHeader(
+        req.header("x-agent-session-id"),
+        "X-Agent-Session-Id",
+        SESSION_ID_MAX_LEN,
+        reqLog
+      );
+      const agentType = parseIdentityHeader(
+        req.header("x-agent-type"),
+        "X-Agent-Type",
+        AGENT_TYPE_MAX_LEN,
+        reqLog
+      );
+
+      // Initial tags include agentType when present so operators can filter
+      // Langfuse traces by agent role. The wrapper appends status:<status>
+      // and outcome:<outcome> later — see src/observability/langfuse.ts.
+      const initialTags = agentType ? [`agentType:${agentType}`] : undefined;
+
+      // Start the trace once we know which tool was requested. sessionId and
+      // userId propagate to OTEL session.id / user.id so the Langfuse UI
+      // groups all of an agent's traces in the Sessions / Users views.
+      // userId is the agent type (e.g. "reviewer"), giving us per-role
+      // filtering and cost attribution in the single-user model — until a
+      // multi-user surface ever shows up, agent role is the closest analogue.
       //
       // Defensive try/catch even though ActiveTrace.span/end isolate errors:
       // a future Tracer impl could throw from startTrace itself. If it does,
@@ -271,10 +342,19 @@ export function createProxyServer(config: ProxyServerConfig): Express {
           metadata: { method, requestId, correlationId },
           // Trace-level input snapshot. Whitelist of safe fields only — never
           // include raw `arguments` (could carry injection text or PII per the
-          // sanitizer's threat model). Operators see this as the Input column
-          // in the Langfuse UI and use it to identify the request without
-          // exposing the payload that the sanitizer is meant to gate.
-          input: { tool, requestId, method, correlationId },
+          // sanitizer's threat model). Identity headers are operator-set,
+          // charset-validated above, and safe to surface in the UI Input column.
+          input: {
+            tool,
+            requestId,
+            method,
+            correlationId,
+            ...(sessionId ? { sessionId } : {}),
+            ...(agentType ? { agentType } : {}),
+          },
+          ...(sessionId ? { sessionId } : {}),
+          ...(agentType ? { userId: agentType } : {}),
+          ...(initialTags ? { tags: initialTags } : {}),
         });
       } catch (err) {
         reqLog.warn({ err }, "startTrace failed");
