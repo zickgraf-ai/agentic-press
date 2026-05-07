@@ -174,9 +174,10 @@ describe("MCP proxy identity headers (X-Agent-Session-Id, X-Agent-Type)", () => 
     await mcpCall(url, 7, "Read", {}, { "X-Agent-Type": tooLong });
     const arg = tracer.startTrace.mock.calls[0]![0];
     expect(arg.userId).toBeUndefined();
-    if (arg.tags) {
-      expect(arg.tags).not.toEqual(expect.arrayContaining([expect.stringMatching(/^agentType:/)]));
-    }
+    // Reviewer fix #6: assert the absence directly. The previous `if (arg.tags)`
+    // guard short-circuited the assertion to a no-op because tags is always
+    // undefined when agentType is rejected.
+    expect(arg.tags).toBeUndefined();
     expect(mockLogger.warn).toHaveBeenCalledWith(
       expect.objectContaining({ header: "X-Agent-Type" }),
       expect.stringMatching(/identity header/i)
@@ -213,5 +214,50 @@ describe("MCP proxy identity headers (X-Agent-Session-Id, X-Agent-Type)", () => 
     expect(arg.sessionId).toBe(sessionAtLimit);
     expect(arg.userId).toBe(typeAtLimit);
     expect(mockLogger.warn).not.toHaveBeenCalled();
+  });
+
+  it("warn-logs and ignores duplicated identity headers (joined value fails charset)", async () => {
+    // Reviewer fix #5: lock in the duplicate-header behaviour. When a reverse
+    // proxy or buggy client sends the same header twice, Node delivers a
+    // single comma-joined string to `req.header()`. The comma fails our
+    // charset regex, so the value degrades to undefined and the request
+    // still processes. This is "accidentally correct" today; the test makes
+    // the behaviour intentional.
+    const headers = new Headers({ "Content-Type": "application/json" });
+    headers.append("X-Agent-Session-Id", "first-value");
+    headers.append("X-Agent-Session-Id", "second-value");
+    const res = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({
+        jsonrpc: "2.0",
+        id: 11,
+        method: "tools/call",
+        params: { name: "Read", arguments: {} },
+      }),
+    });
+    expect(res.status).toBe(200);
+    expect(tracer.startTrace).toHaveBeenCalledTimes(1);
+    expect(tracer.startTrace.mock.calls[0]![0].sessionId).toBeUndefined();
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({ header: "X-Agent-Session-Id" }),
+      expect.stringMatching(/identity header/i)
+    );
+  });
+
+  it("warn log includes a bounded value sample for operator diagnostics", async () => {
+    // Reviewer fix #4: warn log carries a truncated value sample so operators
+    // can identify which dispatch CLI / connector is misconfigured without
+    // having to reproduce the request. Truncated to IDENTITY_LOG_SAMPLE_LEN
+    // (32) so a megabyte-long header doesn't blow up the log line size.
+    const tooLong = "a".repeat(200);
+    await mcpCall(url, 12, "Read", {}, { "X-Agent-Session-Id": tooLong });
+    expect(mockLogger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        header: "X-Agent-Session-Id",
+        valueSample: expect.stringMatching(/^a{32}…$/),
+      }),
+      expect.stringMatching(/identity header/i)
+    );
   });
 });
