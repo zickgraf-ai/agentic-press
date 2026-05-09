@@ -156,8 +156,57 @@ describe("computeMetrics — verdicts", () => {
     expect(verdictFor("verification-before-completion", [], 21)).toBe("DROP");
   });
 
+  it("DROP boundary: 1 invocation at age 21 still DROPs (below threshold)", () => {
+    const one: ClassifiedInvocation[] = [
+      inv({ skillName: "systematic-debugging", outcome: "completed", sessionId: "s1" }),
+    ];
+    expect(verdictFor("systematic-debugging", one, 21)).toBe("DROP");
+  });
+
+  it("DROP boundary: 2 invocations at age 21 do NOT DROP (at/above threshold)", () => {
+    const two: ClassifiedInvocation[] = [
+      inv({ skillName: "systematic-debugging", outcome: "completed", sessionId: "s1" }),
+      inv({ skillName: "systematic-debugging", outcome: "completed", sessionId: "s2" }),
+    ];
+    // 2 invocations < dropBelowInvocations (2) is FALSE, so we don't DROP. 2 sessions/2 invocations
+    // doesn't meet KEEP for systematic-debugging (needs 3 sessions) → UNDECIDED.
+    expect(verdictFor("systematic-debugging", two, 21)).toBe("UNDECIDED");
+  });
+
+  it("grace boundary: 1 invocation at age 13 (within grace) is UNDECIDED, NOT DROP", () => {
+    const one: ClassifiedInvocation[] = [
+      inv({ skillName: "systematic-debugging", outcome: "completed", sessionId: "s1" }),
+    ];
+    expect(verdictFor("systematic-debugging", one, 13)).toBe("UNDECIDED");
+  });
+
+  it("grace boundary: 1 invocation at age 14 (exactly grace) DROPs", () => {
+    const one: ClassifiedInvocation[] = [
+      inv({ skillName: "systematic-debugging", outcome: "completed", sessionId: "s1" }),
+    ];
+    expect(verdictFor("systematic-debugging", one, 14)).toBe("DROP");
+  });
+
+  it("verification-before-completion: 1 invocation at age 21 DROPs", () => {
+    const one: ClassifiedInvocation[] = [
+      inv({ skillName: "verification-before-completion", outcome: "completed", sessionId: "s1" }),
+    ];
+    expect(verdictFor("verification-before-completion", one, 21)).toBe("DROP");
+  });
+
+  it("verification-before-completion: 2 invocations at age 21 — does NOT DROP", () => {
+    const two: ClassifiedInvocation[] = [
+      inv({ skillName: "verification-before-completion", outcome: "completed", sessionId: "s1" }),
+      inv({ skillName: "verification-before-completion", outcome: "completed", sessionId: "s2" }),
+    ];
+    // 2 invocations not below threshold → not DROP; doesn't meet KEEP (needs 5) → UNDECIDED.
+    expect(verdictFor("verification-before-completion", two, 21)).toBe("UNDECIDED");
+  });
+
   it("UNDECIDED when invocations exist but neither KEEP nor DROP threshold is met", () => {
+    // 2 invocations is above DROP threshold (<2) but only 1 session — below KEEP's 2-session bar.
     const invs: ClassifiedInvocation[] = [
+      inv({ skillName: "brainstorming", outcome: "completed", sessionId: "s1" }),
       inv({ skillName: "brainstorming", outcome: "completed", sessionId: "s1" }),
     ];
     expect(verdictFor("brainstorming", invs)).toBe("UNDECIDED");

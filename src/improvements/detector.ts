@@ -21,6 +21,14 @@ const DEFAULT_SKILL_DETECTOR = {
   neverUsedExemptSkills: ["writing-skills"] as const,
 } as const;
 
+/**
+ * Abandonment ratio above which the skill-usage Suggestion confidence
+ * escalates from medium to high. Strict greater-than: at exactly 2/3 the
+ * signal is borderline (e.g. 2 abandoned of 3 classified) — we keep that
+ * at medium to avoid escalating on a single-sample pivot.
+ */
+const HIGH_CONFIDENCE_ABANDONMENT_RATIO = 2 / 3;
+
 const DEFAULT_THRESHOLDS = {
   allowlistDriftThreshold: 3,
   toolFailureThreshold: 3,
@@ -160,9 +168,7 @@ export function detectSkillUsageImprovements(
 
     if (classifiedTotal >= minInvocations && abandoned / classifiedTotal >= abandonRate) {
       const ratio = abandoned / classifiedTotal;
-      // Strict > (not >=): at 2/3 ratio the signal is borderline, keep at medium.
-      // High fires once the rate exceeds the 2/3 boundary (e.g. 3/4 = 75%).
-      const confidence = ratio > 2 / 3 ? "high" : "medium";
+      const confidence = ratio > HIGH_CONFIDENCE_ABANDONMENT_RATIO ? "high" : "medium";
       const pct = Math.round(ratio * 100);
       out.push({
         category: "skill-usage",

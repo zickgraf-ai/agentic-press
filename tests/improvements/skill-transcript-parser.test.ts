@@ -143,6 +143,29 @@ describe("extractSkillInvocations", () => {
     expect(out.map((i) => i.skillName).sort()).toEqual(["a", "b"]);
   });
 
+  it("drops invocations missing uuid/sessionId/timestamp instead of stamping a placeholder (S5)", () => {
+    // Two invocations both missing uuid would, with a placeholder stamp,
+    // collide in findIndex inside classifyInvocation. We drop them instead.
+    const events: SessionEvent[] = [
+      {
+        type: "assistant",
+        // no uuid
+        sessionId: "s1",
+        timestamp: "2026-05-09T12:00:00Z",
+        message: { content: [{ type: "tool_use", name: "Skill", input: { skill: "x" } }] },
+      },
+      assistantEvent({
+        uuid: "good",
+        sessionId: "s2",
+        toolUses: [{ name: "Skill", input: { skill: "y" } }],
+      }),
+    ];
+    const out = extractSkillInvocations(events, "/t/x.jsonl");
+    expect(out).toHaveLength(1);
+    expect(out[0]!.skillName).toBe("y");
+    expect(out[0]!.eventUuid).toBe("good");
+  });
+
   it("preserves sessionId per invocation", () => {
     const events: SessionEvent[] = [
       assistantEvent({ sessionId: "s1", toolUses: [{ name: "Skill", input: { skill: "x" } }] }),
@@ -237,6 +260,90 @@ describe("classifyInvocation", () => {
     expect(classifyInvocation(events, inv)).toBe("completed");
   });
 
+  it("regression (B1): a stop-word at user turn 3 abandons even after benign turns 1-2", () => {
+    // The original implementation returned "completed" on the FIRST benign user message,
+    // so the 5-turn abandonment window was unreachable past iteration 1. This test exposes
+    // that bug by interleaving benign messages before the abandonment-triggering one.
+    const events = buildSession([
+      assistantEvent({ uuid: "inv", toolUses: [{ name: "Skill", input: { skill: "x" } }] }),
+      userTextEvent({ text: "ok let's see" }),
+      assistantEvent({ toolUses: [{ name: "Read", input: { file_path: "/x" } }] }),
+      userTextEvent({ text: "hmm, keep going" }),
+      assistantEvent({ toolUses: [{ name: "Bash", input: { command: "ls" } }] }),
+      userTextEvent({ text: "actually, stop — this is the wrong direction" }),
+    ]);
+    const inv = extractSkillInvocations(events, "/t/x.jsonl")[0]!;
+    expect(classifyInvocation(events, inv)).toBe("abandoned");
+  });
+
+  it("stop-word at user turn 5 (boundary, inside window) abandons", () => {
+    const events = buildSession([
+      assistantEvent({ uuid: "inv", toolUses: [{ name: "Skill", input: { skill: "x" } }] }),
+      userTextEvent({ text: "ok 1" }),
+      userTextEvent({ text: "ok 2" }),
+      userTextEvent({ text: "ok 3" }),
+      userTextEvent({ text: "ok 4" }),
+      userTextEvent({ text: "stop, please" }),
+    ]);
+    const inv = extractSkillInvocations(events, "/t/x.jsonl")[0]!;
+    expect(classifyInvocation(events, inv)).toBe("abandoned");
+  });
+
+  it("stop-word at user turn 6 (outside window) classifies as completed", () => {
+    const events = buildSession([
+      assistantEvent({ uuid: "inv", toolUses: [{ name: "Skill", input: { skill: "x" } }] }),
+      userTextEvent({ text: "ok 1" }),
+      userTextEvent({ text: "ok 2" }),
+      userTextEvent({ text: "ok 3" }),
+      userTextEvent({ text: "ok 4" }),
+      userTextEvent({ text: "ok 5" }),
+      userTextEvent({ text: "stop, please" }), // turn 6 — outside the 5-turn window
+    ]);
+    const inv = extractSkillInvocations(events, "/t/x.jsonl")[0]!;
+    expect(classifyInvocation(events, inv)).toBe("completed");
+  });
+
+  it("pivot at assistant turn 3 (boundary, inside window) abandons", () => {
+    const events = buildSession([
+      assistantEvent({ uuid: "inv", toolUses: [{ name: "Skill", input: { skill: "x" } }] }),
+      assistantEvent({ toolUses: [{ name: "Read", input: {} }] }),
+      assistantEvent({ toolUses: [{ name: "Bash", input: { command: "" } }] }),
+      assistantEvent({ toolUses: [{ name: "Skill", input: { skill: "y" } }] }), // assistant turn 3
+    ]);
+    const inv = extractSkillInvocations(events, "/t/x.jsonl")[0]!;
+    expect(classifyInvocation(events, inv)).toBe("abandoned");
+  });
+
+  it("pivot at assistant turn 4 (outside window) classifies as completed when benign user replies appear", () => {
+    const events = buildSession([
+      assistantEvent({ uuid: "inv", toolUses: [{ name: "Skill", input: { skill: "x" } }] }),
+      assistantEvent({ toolUses: [{ name: "Read", input: {} }] }),
+      assistantEvent({ toolUses: [{ name: "Bash", input: { command: "" } }] }),
+      assistantEvent({ toolUses: [{ name: "Read", input: {} }] }),
+      assistantEvent({ toolUses: [{ name: "Skill", input: { skill: "y" } }] }), // assistant turn 4 — outside window
+      userTextEvent({ text: "great" }),
+    ]);
+    const inv = extractSkillInvocations(events, "/t/x.jsonl")[0]!;
+    expect(classifyInvocation(events, inv)).toBe("completed");
+  });
+
+  it.each([
+    ["please cancel that", "cancel"],
+    ["back up to the previous step", "back up"],
+    ["don't do that", "don't do that"],
+    ["don't do that, restart instead", "don't do that"],
+    ["dont do that", "dont do that (apostrophe optional)"],
+    ["no don't continue", "no don't"],
+    ["/stop", "/stop slash command"],
+  ])("matches stop-word: %s", (text) => {
+    const events = buildSession([
+      assistantEvent({ uuid: "inv", toolUses: [{ name: "Skill", input: { skill: "x" } }] }),
+      userTextEvent({ text }),
+    ]);
+    const inv = extractSkillInvocations(events, "/t/x.jsonl")[0]!;
+    expect(classifyInvocation(events, inv)).toBe("abandoned");
+  });
+
   it("does not match stop-words inside larger words (e.g. 'backup' vs 'back up')", () => {
     const events = buildSession([
       assistantEvent({ uuid: "inv", toolUses: [{ name: "Skill", input: { skill: "x" } }] }),
@@ -291,7 +398,6 @@ describe("findSessionLogDir", () => {
 
 describe("collectInvocations", () => {
   it("walks all .jsonl files in a directory and returns classified invocations", () => {
-    // Two session files in workDir, each with one Skill invocation.
     const file1 = join(workDir, "session-a.jsonl");
     const file2 = join(workDir, "session-b.jsonl");
     writeFileSync(
@@ -319,14 +425,14 @@ describe("collectInvocations", () => {
       ])
     );
 
-    const out = collectInvocations(workDir, "2026-05-01T00:00:00.000Z");
-    expect(out).toHaveLength(2);
-    const skills = out.map((i) => i.skillName).sort();
+    const { invocations, parseStats } = collectInvocations(workDir, "2026-05-01T00:00:00.000Z");
+    expect(invocations).toHaveLength(2);
+    const skills = invocations.map((i) => i.skillName).sort();
     expect(skills).toEqual(["brainstorming", "systematic-debugging"]);
-    const brainstorming = out.find((i) => i.skillName === "brainstorming")!;
-    const systematic = out.find((i) => i.skillName === "systematic-debugging")!;
-    expect(brainstorming.outcome).toBe("abandoned");
-    expect(systematic.outcome).toBe("completed");
+    expect(invocations.find((i) => i.skillName === "brainstorming")!.outcome).toBe("abandoned");
+    expect(invocations.find((i) => i.skillName === "systematic-debugging")!.outcome).toBe("completed");
+    expect(parseStats.filesScanned).toBe(2);
+    expect(parseStats.malformedLines).toBe(0);
   });
 
   it("filters by lookback (sinceISO) — older invocations excluded", () => {
@@ -348,13 +454,40 @@ describe("collectInvocations", () => {
         }),
       ])
     );
-    const out = collectInvocations(workDir, "2026-05-01T00:00:00.000Z");
-    const skills = out.map((i) => i.skillName);
+    const { invocations } = collectInvocations(workDir, "2026-05-01T00:00:00.000Z");
+    const skills = invocations.map((i) => i.skillName);
     expect(skills).toContain("y");
     expect(skills).not.toContain("x");
   });
 
-  it("returns empty array when the directory does not exist", () => {
-    expect(collectInvocations(join(workDir, "missing"), "2026-01-01T00:00:00.000Z")).toEqual([]);
+  it("returns zero-counts when the directory does not exist", () => {
+    const out = collectInvocations(join(workDir, "missing"), "2026-01-01T00:00:00.000Z");
+    expect(out.invocations).toEqual([]);
+    expect(out.parseStats).toEqual({ filesScanned: 0, missingFiles: 0, totalLines: 0, malformedLines: 0 });
+  });
+
+  it("counts malformed lines so transcript-format drift is visible", () => {
+    const file = join(workDir, "session.jsonl");
+    writeFileSync(
+      file,
+      [
+        JSON.stringify(
+          assistantEvent({
+            sessionId: "s",
+            uuid: "ev",
+            timestamp: "2026-05-08T12:00:00.000Z",
+            toolUses: [{ name: "Skill", input: { skill: "x" } }],
+          })
+        ),
+        // Three malformed lines (truncated, primitive, interleaved pino).
+        `{"truncated`,
+        `42`,
+        `{"level":30,"msg":"pino"}`, // valid JSON, but an object — counts as event, not malformed
+      ].join("\n") + "\n"
+    );
+    const { parseStats } = collectInvocations(workDir, "2026-05-01T00:00:00.000Z");
+    expect(parseStats.totalLines).toBe(4);
+    // Truncated + bare primitive = 2 malformed; pino object passes JSON.parse and is kept as a session event.
+    expect(parseStats.malformedLines).toBe(2);
   });
 });

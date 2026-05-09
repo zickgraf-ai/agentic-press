@@ -16,6 +16,14 @@ import type {
   ClassifiedInvocation,
   VendoredSkill,
 } from "./types.js";
+import type { ParseStats } from "./skill-transcript.js";
+
+/**
+ * Canonical trial end date. Referenced by report templates and CLAUDE.md /
+ * README narrative. Code only consumes this constant; non-TS files (plist,
+ * install script) cite it as documentation rather than embedding a literal.
+ */
+export const TRIAL_END_DATE = "2026-05-30";
 
 export interface PerSkillMetrics {
   readonly skillName: string;
@@ -35,6 +43,8 @@ export interface SkillUsageMetrics {
   readonly windowEnd: string;
   readonly totalSessionsAnalyzed: number;
   readonly perSkill: readonly PerSkillMetrics[];
+  /** Optional — surfaced from collectInvocations so the report flags transcript drift. */
+  readonly parseStats?: ParseStats;
 }
 
 interface VerdictRule {
@@ -46,8 +56,8 @@ interface VerdictRule {
   readonly minSessionsForKeep?: number;
   /** KEEP requires completionRate at or above this. */
   readonly minCompletionRateForKeep?: number;
-  /** DROP if invocations is strictly below this AFTER grace period. */
-  readonly maxInvocationsForDrop?: number;
+  /** DROP if invocations is strictly below this threshold AFTER grace period. */
+  readonly dropBelowInvocations?: number;
   /** Days a skill must exist before DROP can fire. */
   readonly graceDays?: number;
 }
@@ -56,25 +66,28 @@ const DEFAULT_GRACE_DAYS = 14;
 
 /**
  * Per-skill verdict rules. Mirrors the trial framework documented in
- * `.improvements/README.md`. If a vendored skill is not listed here, it
- * gets a permissive default (UNDECIDED unless 0 invocations after grace).
+ * `.improvements/README.md`. The `dropBelowInvocations` threshold is
+ * read as "DROP if invocations < this AFTER the grace period" — uniform
+ * 2 across all auto-dropping skills (matches the README's "<2" wording).
+ *
+ * If a vendored skill is not listed here, it falls through to UNDECIDED.
  */
 const VERDICT_RULES: Record<string, VerdictRule> = {
   "systematic-debugging": {
     minSessionsForKeep: 3,
     minCompletionRateForKeep: 0.7,
-    maxInvocationsForDrop: 1,
+    dropBelowInvocations: 2,
     graceDays: DEFAULT_GRACE_DAYS,
   },
   "brainstorming": {
     minSessionsForKeep: 2,
     minCompletionRateForKeep: 0.7,
-    maxInvocationsForDrop: 1,
+    dropBelowInvocations: 2,
     graceDays: DEFAULT_GRACE_DAYS,
   },
   "verification-before-completion": {
     minInvocationsForKeep: 5,
-    maxInvocationsForDrop: 2,
+    dropBelowInvocations: 2,
     graceDays: DEFAULT_GRACE_DAYS,
   },
   "writing-skills": {
@@ -83,7 +96,7 @@ const VERDICT_RULES: Record<string, VerdictRule> = {
   "subagent-driven-development": {
     minSessionsForKeep: 2,
     minCompletionRateForKeep: 0.7,
-    maxInvocationsForDrop: 1,
+    dropBelowInvocations: 2,
     graceDays: DEFAULT_GRACE_DAYS,
   },
 };
@@ -129,7 +142,8 @@ export function computeMetrics(
   totalSessionsAnalyzed: number,
   windowStart: string,
   windowEnd: string,
-  now: Date = new Date()
+  now: Date = new Date(),
+  parseStats?: ParseStats
 ): SkillUsageMetrics {
   const byName = new Map<string, ClassifiedInvocation[]>();
   for (const inv of invocations) {
@@ -174,6 +188,7 @@ export function computeMetrics(
     windowEnd,
     totalSessionsAnalyzed,
     perSkill,
+    parseStats,
   };
 }
 
@@ -182,18 +197,14 @@ function deriveVerdict(
   m: { invocations: number; sessionsUsedIn: number; completionRate: number; ageDays: number }
 ): PerSkillMetrics["verdict"] {
   const rule = VERDICT_RULES[skillName];
-  if (!rule) {
-    if (m.invocations === 0) return "UNDECIDED";
-    return "UNDECIDED";
-  }
+  if (!rule) return "UNDECIDED";
   if (rule.measureOnly) return "MEASURE";
 
   const grace = rule.graceDays ?? DEFAULT_GRACE_DAYS;
-  if (m.ageDays < grace) {
-    if (m.invocations === 0) return "UNDECIDED";
-  } else if (
-    rule.maxInvocationsForDrop !== undefined &&
-    m.invocations < rule.maxInvocationsForDrop
+  if (
+    m.ageDays >= grace &&
+    rule.dropBelowInvocations !== undefined &&
+    m.invocations < rule.dropBelowInvocations
   ) {
     return "DROP";
   }
@@ -226,6 +237,16 @@ export function renderReport(metrics: SkillUsageMetrics): string {
   lines.push(`**Window:** ${metrics.windowStart} → ${metrics.windowEnd}`);
   lines.push(`**Sessions analyzed:** ${metrics.totalSessionsAnalyzed}`);
   lines.push(`**Generated:** ${new Date().toISOString()}`);
+  if (metrics.parseStats) {
+    const ps = metrics.parseStats;
+    const malformedNote =
+      ps.malformedLines === 0
+        ? "0"
+        : `${ps.malformedLines} ⚠️ — investigate transcript-format drift if non-zero`;
+    lines.push(
+      `**Parser stats:** ${ps.filesScanned} files, ${ps.totalLines} lines, ${malformedNote}`
+    );
+  }
   lines.push("");
   lines.push("## Per-skill metrics");
   lines.push("");
@@ -254,7 +275,9 @@ export function renderReport(metrics: SkillUsageMetrics): string {
   lines.push("- **MEASURE** — meta-skill exempted from auto-drop signal; use only the raw counts to judge.");
   lines.push("- **UNDECIDED** — neither threshold met; let the trial run further.");
   lines.push("");
-  lines.push("Decision date: **2026-05-30**. Review the third-week report and update `.claude/skills/` and `CLAUDE.md` accordingly.");
+  lines.push(
+    `Decision date: **${TRIAL_END_DATE}**. Review the third-week report and update \`.claude/skills/\` and \`CLAUDE.md\` accordingly.`
+  );
   lines.push("");
   return lines.join("\n");
 }
@@ -269,8 +292,12 @@ function verdictHint(row: PerSkillMetrics): string {
       return ` — meta-skill, no auto-drop. Raw counts: ${row.invocations} invocations across ${row.sessionsUsedIn} sessions.`;
     case "UNDECIDED":
       return ` — ${row.invocations} invocations across ${row.sessionsUsedIn} sessions. Trial threshold not yet reached.`;
-    default:
+    default: {
+      // Exhaustiveness check — adding a new verdict will fail compilation here.
+      const _exhaustive: never = row.verdict;
+      void _exhaustive;
       return "";
+    }
   }
 }
 

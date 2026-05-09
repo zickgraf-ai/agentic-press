@@ -113,6 +113,7 @@ if (!opts.skipAudit) {
       }
     } catch (err) {
       console.error(`[sweep:audit] FAILED: ${err.message}`);
+      if (err.stack) console.error(err.stack);
     }
   }
 }
@@ -130,16 +131,26 @@ if (!opts.skipSkillMetrics) {
     if (skills.length === 0) {
       console.log(`[sweep:skill] no vendored skills found in ${skillsDir} — skipping skill-metrics phase`);
     } else {
-      const invocations = collectInvocations(sessionLogDir, windowStart);
+      const { invocations, parseStats } = collectInvocations(sessionLogDir, windowStart);
       const sessionsAnalyzed = new Set(invocations.map((i) => i.sessionId)).size;
 
       // Write the always-regenerated dashboard.
-      const metrics = computeMetrics(invocations, skills, sessionsAnalyzed, windowStart, windowEnd, now);
+      const metrics = computeMetrics(
+        invocations,
+        skills,
+        sessionsAnalyzed,
+        windowStart,
+        windowEnd,
+        now,
+        parseStats
+      );
       const metricsDir = join(dir, "metrics");
       if (!existsSync(metricsDir)) mkdirSync(metricsDir, { recursive: true });
       const reportPath = join(metricsDir, reportFileName(now));
       writeFileSync(reportPath, renderReport(metrics), "utf8");
-      console.log(`[sweep:skill] wrote ${reportPath} (${skills.length} skills, ${invocations.length} invocations across ${sessionsAnalyzed} sessions)`);
+      console.log(
+        `[sweep:skill] wrote ${reportPath} (${skills.length} skills, ${invocations.length} invocations across ${sessionsAnalyzed} sessions; parsed ${parseStats.totalLines} lines, ${parseStats.malformedLines} malformed)`
+      );
 
       // Run anti-signal detector.
       const skillSuggestions = detectSkillUsageImprovements(invocations, skills, { now });
@@ -161,6 +172,7 @@ if (!opts.skipSkillMetrics) {
     }
   } catch (err) {
     console.error(`[sweep:skill] FAILED: ${err.message}`);
+    if (err.stack) console.error(err.stack);
   }
 }
 
