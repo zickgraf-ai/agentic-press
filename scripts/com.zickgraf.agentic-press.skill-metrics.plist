@@ -1,0 +1,56 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Weekly skill-usage metrics sweep for the 3-week trial (issue #55).
+
+  Trial sunset: 2026-05-30. After the third weekly report, either:
+    - extend by editing this plist's StartCalendarInterval, or
+    - stop entirely:
+        launchctl unload ~/Library/LaunchAgents/com.zickgraf.agentic-press.skill-metrics.plist
+        rm ~/Library/LaunchAgents/com.zickgraf.agentic-press.skill-metrics.plist
+
+  Loaded once via scripts/install-skill-metrics-cron.sh (user-run, not automatic).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.zickgraf.agentic-press.skill-metrics</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/opt/homebrew/bin/npm</string>
+        <string>run</string>
+        <string>sweep-skill-metrics</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/jeffzickgraf/Code/agentic-press</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+
+    <!-- Mondays at 09:00 local time. Weekday: 1 = Monday. -->
+    <key>StartCalendarInterval</key>
+    <dict>
+        <key>Weekday</key>
+        <integer>1</integer>
+        <key>Hour</key>
+        <integer>9</integer>
+        <key>Minute</key>
+        <integer>0</integer>
+    </dict>
+
+    <!-- Don't run on load — wait for the next scheduled time. -->
+    <key>RunAtLoad</key>
+    <false/>
+
+    <key>StandardOutPath</key>
+    <string>/tmp/agentic-press-skill-metrics.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/tmp/agentic-press-skill-metrics.log</string>
+</dict>
+</plist>
