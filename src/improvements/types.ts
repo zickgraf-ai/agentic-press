@@ -74,18 +74,25 @@ export interface DetectorOptions {
 }
 
 /**
- * One Skill-tool invocation extracted from a Claude Code session transcript,
- * with an outcome classification produced by the abandonment heuristic.
+ * One Skill-tool invocation extracted from a Claude Code session transcript.
+ * The classification stage adds an `outcome` field — see ClassifiedInvocation.
  *
  * See `src/improvements/skill-transcript.ts` for the producer.
  */
-export interface ClassifiedInvocation {
+export interface SkillInvocation {
   readonly sessionId: string;
   readonly timestamp: string;
   readonly skillName: string;
   readonly transcriptPath: string;
   readonly eventUuid: string;
   readonly parentUuid?: string;
+}
+
+/**
+ * A SkillInvocation tagged with the abandonment-heuristic outcome.
+ * Consumed by `detectSkillUsageImprovements`.
+ */
+export interface ClassifiedInvocation extends SkillInvocation {
   readonly outcome: InvocationOutcome;
 }
 
