@@ -193,4 +193,64 @@ describe("createMissionControlAdapter", () => {
   it("shutdown resolves without throwing", async () => {
     await expect(adapter.shutdown()).resolves.toBeUndefined();
   });
+
+  // ── Tier 1.2 — agent identity in MC POST body ───────────────────────────
+  // pushActivity translates ActivityEvent → MC `/api/hermes/events` POST body.
+  // With identity propagation, agent_name now uses event.agentType (when
+  // present) so MC's panels can demultiplex per agent role; data.session_id
+  // is set when event.sessionId is present so MC can group activity by session.
+
+  it("pushActivity uses agentType for agent_name when ActivityEvent has agentType", async () => {
+    fetchSpy.mockResolvedValueOnce({ ok: true });
+    await adapter.pushActivity({
+      type: "tool_call",
+      tool: "Read",
+      timestamp: "2026-05-07T00:00:00.000Z",
+      status: "allowed",
+      agentType: "reviewer",
+    });
+    const [, opts] = fetchSpy.mock.calls[0]!;
+    const body = JSON.parse(opts.body);
+    expect(body.agent_name).toBe("reviewer");
+  });
+
+  it("pushActivity falls back to 'agentic-press-proxy' for agent_name when agentType is absent", async () => {
+    fetchSpy.mockResolvedValueOnce({ ok: true });
+    await adapter.pushActivity({
+      type: "tool_call",
+      tool: "Read",
+      timestamp: "2026-05-07T00:00:00.000Z",
+      status: "allowed",
+    });
+    const [, opts] = fetchSpy.mock.calls[0]!;
+    const body = JSON.parse(opts.body);
+    expect(body.agent_name).toBe("agentic-press-proxy");
+  });
+
+  it("pushActivity includes data.session_id when ActivityEvent has sessionId", async () => {
+    fetchSpy.mockResolvedValueOnce({ ok: true });
+    await adapter.pushActivity({
+      type: "tool_call",
+      tool: "Read",
+      timestamp: "2026-05-07T00:00:00.000Z",
+      status: "allowed",
+      sessionId: "task-001",
+    });
+    const [, opts] = fetchSpy.mock.calls[0]!;
+    const body = JSON.parse(opts.body);
+    expect(body.data.session_id).toBe("task-001");
+  });
+
+  it("pushActivity omits data.session_id when sessionId is absent (Phase 1 shape)", async () => {
+    fetchSpy.mockResolvedValueOnce({ ok: true });
+    await adapter.pushActivity({
+      type: "tool_call",
+      tool: "Read",
+      timestamp: "2026-05-07T00:00:00.000Z",
+      status: "allowed",
+    });
+    const [, opts] = fetchSpy.mock.calls[0]!;
+    const body = JSON.parse(opts.body);
+    expect(body.data.session_id).toBeUndefined();
+  });
 });

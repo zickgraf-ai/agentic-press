@@ -11,8 +11,28 @@ const log = childLogger("metrics");
 /** Block reason categories — closed union so cardinality is bounded and typos fail at compile time. */
 export type BlockReason = "allowlist" | "path_guard" | "no_route" | "unknown";
 
+/**
+ * Sentinel `agentType` label value used when no X-Agent-Type header was sent.
+ * Keeping the label present in every series — rather than emitting two
+ * different series shapes depending on whether the header was set — means
+ * Prometheus queries can group/sum over `agentType` without special-casing.
+ *
+ * Cardinality is operator-controlled via the X-Agent-Type charset/length
+ * limits enforced by the proxy's identity-header parser, so the label set
+ * stays bounded.
+ */
+export const AGENT_TYPE_UNSPECIFIED = "unspecified";
+
 export interface MetricsRecorder {
-  recordRequest(tool: string, status: AuditStatus, durationMs: number): void;
+  /**
+   * Record one terminal pipeline outcome.
+   *
+   * `agentType` is the optional value of the X-Agent-Type header carried
+   * through from the proxy's audit pipeline (Tier 1.2 / #53). When undefined
+   * the recorder labels the series with `AGENT_TYPE_UNSPECIFIED` so Prometheus
+   * sees the same label set on every emitted series.
+   */
+  recordRequest(tool: string, status: AuditStatus, durationMs: number, agentType?: string): void;
   recordInjectionFlag(pattern: string): void;
   recordBlockedRequest(reason: BlockReason): void;
   metricsText(): Promise<{ contentType: string; body: string }>;
@@ -70,15 +90,15 @@ export async function createMetricsRecorder(config: MetricsConfig): Promise<Metr
 
   const requestCounter = new promClient.Counter({
     name: "mcp_proxy_requests_total",
-    help: "Total MCP proxy requests, partitioned by tool and status",
-    labelNames: ["tool", "status"],
+    help: "Total MCP proxy requests, partitioned by tool, status, and agentType",
+    labelNames: ["tool", "status", "agentType"],
     registers: [register],
   });
 
   const requestDuration = new promClient.Histogram({
     name: "mcp_proxy_request_duration_seconds",
-    help: "MCP proxy request duration in seconds, partitioned by tool and status",
-    labelNames: ["tool", "status"],
+    help: "MCP proxy request duration in seconds, partitioned by tool, status, and agentType",
+    labelNames: ["tool", "status", "agentType"],
     buckets: [0.001, 0.005, 0.01, 0.05, 0.1, 0.5, 1, 2, 5, 10],
     registers: [register],
   });
@@ -101,10 +121,11 @@ export async function createMetricsRecorder(config: MetricsConfig): Promise<Metr
   promClient.collectDefaultMetrics({ register });
 
   return {
-    recordRequest(tool, status, durationMs) {
+    recordRequest(tool, status, durationMs, agentType) {
+      const labels = { tool, status, agentType: agentType ?? AGENT_TYPE_UNSPECIFIED };
       try {
-        requestCounter.inc({ tool, status });
-        requestDuration.observe({ tool, status }, durationMs / 1000);
+        requestCounter.inc(labels);
+        requestDuration.observe(labels, durationMs / 1000);
       } catch (err) {
         log.warn({ err }, "recordRequest failed (ignored)");
       }

@@ -20,7 +20,22 @@ export interface ActivityEvent {
   readonly durationMs?: number;
   readonly flags?: readonly string[];
   readonly errorMessage?: string;
+  /**
+   * Per-agent identity propagated from the proxy's request envelope (#53).
+   * `sessionId` identifies a specific run/task; `agentType` identifies the
+   * role (e.g. "reviewer", "coder"). Both optional — Phase 1 single-agent
+   * deployments emit events with neither.
+   */
+  readonly sessionId?: string;
+  readonly agentType?: string;
 }
+
+/**
+ * Agent name attributed to events with no `agentType`. Exported so the
+ * planned MC connection adapter can register under the same name and the
+ * board attribution stays consistent.
+ */
+export const DEFAULT_AGENT_NAME = "agentic-press-proxy";
 
 export interface DashboardAdapter {
   registerSession(sandboxName: SandboxId, taskDescription?: string): Promise<DashboardSession>;
@@ -132,7 +147,7 @@ export function createMissionControlAdapter(
         headers: headers(),
         body: JSON.stringify({
           event: `tool:${event.type}`,
-          agent_name: "agentic-press-proxy",
+          agent_name: event.agentType ?? DEFAULT_AGENT_NAME,
           source: "mcp-proxy",
           timestamp: event.timestamp,
           data: {
@@ -141,6 +156,7 @@ export function createMissionControlAdapter(
             durationMs: event.durationMs,
             flags: event.flags,
             errorMessage: event.errorMessage,
+            ...(event.sessionId !== undefined ? { session_id: event.sessionId } : {}),
           },
         }),
       });

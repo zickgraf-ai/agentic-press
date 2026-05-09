@@ -156,4 +156,36 @@ describe("createEventBridge", () => {
     await bridge.shutdown();
     expect(adapter.shutdown).toHaveBeenCalledTimes(1);
   });
+
+  // ── Tier 1.2 — identity propagation ──────────────────────────────────────
+
+  it("propagates entry.sessionId to ActivityEvent.sessionId", async () => {
+    bridge.emit(makeEntry({ sessionId: "task-001" }));
+    await bridge.flush();
+    const event: ActivityEvent = adapter.pushActivity.mock.calls[0]![0];
+    expect(event.sessionId).toBe("task-001");
+  });
+
+  it("propagates entry.agentType to ActivityEvent.agentType", async () => {
+    bridge.emit(makeEntry({ agentType: "reviewer" }));
+    await bridge.flush();
+    const event: ActivityEvent = adapter.pushActivity.mock.calls[0]![0];
+    expect(event.agentType).toBe("reviewer");
+  });
+
+  it("propagates both identity fields together", async () => {
+    bridge.emit(makeEntry({ sessionId: "task-002", agentType: "coder" }));
+    await bridge.flush();
+    const event: ActivityEvent = adapter.pushActivity.mock.calls[0]![0];
+    expect(event.sessionId).toBe("task-002");
+    expect(event.agentType).toBe("coder");
+  });
+
+  it("omits sessionId/agentType from ActivityEvent when entry has neither (Phase 1 shape)", async () => {
+    bridge.emit(makeEntry());
+    await bridge.flush();
+    const event: ActivityEvent = adapter.pushActivity.mock.calls[0]![0];
+    expect(event.sessionId).toBeUndefined();
+    expect(event.agentType).toBeUndefined();
+  });
 });
