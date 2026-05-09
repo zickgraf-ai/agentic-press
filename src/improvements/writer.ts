@@ -45,13 +45,17 @@ export function generateSuggestionId(suggestion: Suggestion, now: Date = new Dat
 }
 
 function getEvidenceSlug(suggestion: Suggestion): string {
-  // Tool-keyed categories use the tool name as the discriminator.
-  // Future non-tool categories will need their own discriminator logic.
+  // Each category names the field it slugs from. Tool-keyed categories use
+  // tool name; skill-usage uses skillName. Future non-keyed categories
+  // (token-heavy, stale-setup-command) fall through to "unknown" until they
+  // gain a discriminator.
   switch (suggestion.category) {
     case "allowlist-drift":
     case "tool-failure":
     case "bridge-timeout":
       return String(suggestion.evidence.tool ?? "unknown");
+    case "skill-usage":
+      return String(suggestion.evidence.skillName ?? "unknown");
     default:
       return "unknown";
   }

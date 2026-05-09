@@ -59,6 +59,17 @@ describe("generateSuggestionId", () => {
     );
     expect(id).toContain("fs--write-file");
   });
+
+  it("skill-usage slug derives from skillName, not tool", () => {
+    const id = generateSuggestionId(
+      makeSuggestion({
+        category: "skill-usage",
+        evidence: { skillName: "systematic-debugging", invocations: 0 },
+      }),
+      new Date("2026-04-26T18:00:00Z")
+    );
+    expect(id).toBe("2026-04-26-skill-usage-systematic-debugging");
+  });
 });
 
 describe("buildSuggestionFile", () => {
