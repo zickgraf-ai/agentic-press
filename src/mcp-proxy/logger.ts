@@ -2,7 +2,9 @@ import { closeSync, openSync, writeSync } from "node:fs";
 import type { SanitizeFlag } from "./sanitizer.js";
 import type { AuditStatus } from "../types.js";
 
-export type AuditDirection = "request" | "response";
+export type AuditDirection = "request" | "response" | "control-plane";
+
+export type ControlPlaneAction = "register" | "deregister";
 
 export interface AuditEntry {
   readonly timestamp: string;
@@ -14,7 +16,9 @@ export interface AuditEntry {
   /**
    * Which pipeline stage produced this entry. "request" covers allowlist,
    * request-arg sanitization, and path guard. "response" covers upstream
-   * MCP server response sanitization. Defaults to "request" when omitted.
+   * MCP server response sanitization. "control-plane" covers session-registry
+   * mutations (register/deregister) emitted by the control-plane server
+   * (Tier 1.3 / #56). Defaults to "request" when omitted.
    */
   readonly direction?: AuditDirection;
   /**
@@ -34,6 +38,16 @@ export interface AuditEntry {
    */
   readonly sessionId?: string;
   readonly agentType?: string;
+  /**
+   * Control-plane fields (Tier 1.3 / #56) — only set when
+   * `direction === "control-plane"`. The allowlist contents are NEVER
+   * recorded; only the count of allowed tools, so an audit-log reader cannot
+   * derive an operator-private allowlist by scraping NDJSON.
+   */
+  readonly action?: ControlPlaneAction;
+  readonly remoteAddress?: string;
+  readonly remotePort?: number;
+  readonly allowedToolsCount?: number;
 }
 
 /**

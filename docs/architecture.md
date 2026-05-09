@@ -23,6 +23,9 @@ flowchart LR
   end
   subgraph HOST["host machine"]
     P["MCP proxy<br/>(Express, :18923)"]
+    CP["control plane<br/>(Express, 127.0.0.1:18924)"]
+    REG[("session<br/>registry")]
+    DCLI["dispatch CLI / MC connector<br/>(holds MCP_CONTROL_TOKEN)"]
     B["stdio bridge"]
     H["http bridge"]
     M1["MCP server:<br/>filesystem"]
@@ -31,7 +34,10 @@ flowchart LR
   subgraph REMOTE["remote (Phase 2)"]
     M3["MCP server:<br/>https://...<br/>(container/Lambda)"]
   end
-  A -- "JSON-RPC / HTTP<br/>host.docker.internal:18923" --> P
+  A -- "JSON-RPC / HTTP<br/>host.docker.internal:18923<br/>X-Agent-Session-Id" --> P
+  DCLI -- "Bearer token<br/>POST/DELETE /sessions" --> CP
+  CP -- writes --> REG
+  P -- reads --> REG
   P -- "JSON-RPC / stdio" --> B
   P -- "JSON-RPC / HTTPS<br/>Bearer auth" --> H
   B --> M1
@@ -45,6 +51,8 @@ flowchart LR
   P -- "NDJSON audit" --> LOG[("stdout audit stream")]
   P -- "pino JSON" --> DIAG[("stdout diagnostic stream")]
 ```
+
+The proxy port (`0.0.0.0:18923`) is reachable from sandboxes via `host.docker.internal`; the control-plane port (`127.0.0.1:18924`) is **not** — it binds to loopback so only host-side processes (the dispatch CLI / Mission Control connector) can register or query sessions. See [`./security.md`](./security.md#control-plane-trust-boundary) for the threat model.
 
 ## Request pipeline
 
@@ -127,7 +135,7 @@ The proxy enforces three independent controls. Defense in depth is intentional �
 
 | Control | File | Blocks |
 |---|---|---|
-| allowlist | `src/mcp-proxy/allowlist.ts` | Any tool name not matching a configured pattern. Malformed config blocks everything. |
+| allowlist | `src/mcp-proxy/allowlist.ts` (+ `src/orchestrator/session-registry.ts` for per-session) | Any tool name not matching a configured pattern. Malformed config blocks everything. When the request carries `X-Agent-Session-Id` and the session is registered via the control plane, the per-session allowlist takes precedence; otherwise the global `ALLOWED_TOOLS` list applies (Phase 1 default). |
 | sanitizer (request + response) | `src/mcp-proxy/sanitizer.ts`, `src/mcp-proxy/response-sanitizer.ts`, `src/security/injection-patterns.ts` | Prompt-injection text, turn-boundary markers, zero-width unicode, dangerous base64, `<script>` / iframe / event-handler markup, `javascript:` URIs, markdown image exfiltration, injected `tools` / `function_call` / `</tool_result>` fragments — applied to **both** request arguments and upstream responses. Clean-room patterns sourced from OWASP LLM Top 10, the MCP spec, and published CVEs (incl. CVE-2025-6514). |
 | path guard | `src/security/path-guard.ts` | Null bytes, backslashes, drive letters, encoded traversal (`%2e%2e`, double-encoded, overlong UTF-8, fullwidth), logical escape from `workspaceRoot`, symlink escape (CVE-2025-53109), containment bypass (CVE-2025-53110). |
 

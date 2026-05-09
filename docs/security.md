@@ -105,6 +105,43 @@ The proxy is one layer in a defense-in-depth strategy. The following concerns ar
 - **Workspace secret hygiene.** The allowlist does not distinguish credential files from any other file. Keep secrets out of the sandbox workspace; mount them only through sbx's secret-management surface.
 - **Defense-in-depth for prompt injection.** Pattern-based detection is one layer; combine it with output validation, content provenance checks, and human-in-the-loop confirmation for high-stakes tool calls. Use `block` mode for high-assurance deployments.
 
+## Control-plane trust boundary
+
+Tier 1.3 (#56) introduces a **second HTTP listener** alongside the proxy: the control-plane server. The proxy serves untrusted sandbox traffic on `0.0.0.0:18923`; the control plane handles privileged session-registry mutations on `127.0.0.1:18924`. A sandbox-side process registering a permissive allowlist for itself would defeat the entire per-session policy, so the control plane's trust boundary is non-negotiable.
+
+**Two layers, belt-and-braces:**
+
+1. **Loopback bind** on `127.0.0.1:18924`. Sandboxes can reach `host.docker.internal` (the host's Docker bridge IP) but **not** the host's loopback interface — connections to `127.0.0.1:18924` from inside a sandbox are RST'd at the kernel. The bind is a hard-coded literal in `src/index.ts`; there is intentionally no env knob to widen it. Changing it requires a code change and security review.
+2. **Bearer-token gate** via the `MCP_CONTROL_TOKEN` env var on every endpoint except `GET /health`. Comparison uses `crypto.timingSafeEqual` with an explicit length check first (a wrong-length token returns 401, not 400 — preventing a length-probe distinguisher). When the token is unset at startup the control plane **does not start** and the proxy continues with the global allowlist as in Phase 1.
+
+**Threat decomposition.** "Sandbox escape" is six different concerns; each has a different defence:
+
+| # | Threat | Primary defence | Backstop | Out-of-scope / caveats |
+|---|---|---|---|---|
+| 1 | **Container escape (kernel-level)** — agent gets shell on host kernel via Docker / container exploit | sbx + Docker isolation, kernel patching | None at our layer | Operator responsibility; tracked under [Operator Responsibilities](#operator-responsibilities) |
+| 2 | **Network escape** — sandbox tries `curl http://host.docker.internal:18924/sessions` | Loopback bind on `127.0.0.1:18924`. `host.docker.internal` resolves to the Docker bridge IP, **not** `127.0.0.1`; connection refused | Bearer token | **Depends on sbx not running sandboxes with `--network host`.** Documented dependency on the sbx side. |
+| 3 | **Token theft** — agent obtains the bearer token | (a) Token never enters sandbox — host-side env only, never passed via `sbx exec --env`. (b) Token never logs (audit, trace, Prometheus, MC adapter, stdout). (c) 256-bit unguessable. (d) `crypto.timingSafeEqual` with explicit length check | Loopback bind: stolen token alone won't reach the port from outside the host | Operator footgun: pasting the token into a terminal whose stdout ends up in a sandbox-readable location leaks it. Documented but not enforced. |
+| 4 | **Identity spoofing** — agent A sets `X-Agent-Session-Id` to agent B's id to inherit B's allowlist | Dispatch CLI (Tier 1.4) mints session IDs as 16-byte random hex — unguessable. Per-sandbox workspace mounts (sbx default) prevent A from reading a file B wrote | Lookup precedence: a forged session id that doesn't exist in the registry falls through to the global allowlist (the most-restrictive baseline) | If operator deliberately gives two agents a shared workspace mount, one can leak its session id to the other. Documented sharp edge. |
+| 5 | **Confused deputy via dispatch CLI** — agent influences the dispatch CLI (which holds the token) into registering a permissive session for it | Tier 1.4 contract: dispatch CLI constructs the registration payload from operator-provided manifest only — never from sandbox stdout, never from sandbox-writable files | None at the control-plane layer (this lives one layer up) | Tier 1.3 must not preclude this contract. Future MC connectors must inherit it. |
+| 6 | **Self-elevation via /mcp** — agent calls a /mcp method that mutates the registry | Not a vector by construction: `/mcp` doesn't speak the control-plane protocol; the proxy reads but never writes the registry. Type-level guard: `ProxyServerConfig.registry` is `Pick<SessionRegistry, "lookup">`, so a TypeScript-level mistake won't compile | Code review for any new `/mcp` admin method | A future PR adding `/mcp/admin` would need explicit Plan-Mode approval. |
+
+**Defences explicitly NOT added:**
+
+| Not added | Reason |
+|---|---|
+| mTLS on control plane | Heavy. Single-user system. Loopback + token suffices. |
+| Per-token rate limiting | Loopback bind already restricts attack surface to host-only. Add later if it becomes a real signal. |
+| Token rotation without restart | Env-based config, restart-to-rotate. Acceptable single-user trade-off. |
+| Configurable bind via env var | Operator footgun that could silently void the primary defence. Hard-coded literal in source. |
+| Auto-generation of bearer token with stdout print | "Secret printed to logs" is a bad pattern even when intentional, and fragile if operator doesn't capture stdout. Explicit-only. |
+
+**Audit invariants for the control plane:**
+
+- Successful `POST /sessions` and `DELETE /sessions/:id` write a single `direction: "control-plane"` audit entry per call. Structured fields capture `action` (`register`/`deregister`), `sessionId`, `agentType`, `remoteAddress`, `remotePort`, and (for register only) `allowedToolsCount`.
+- The allowlist contents are **never** recorded — only the count of allowed tools — so an audit-log reader cannot derive an operator-private allowlist by scraping NDJSON.
+- 401 / 400 rejections write a warn-log only, **not** an audit entry. This prevents a probe burst from flooding the NDJSON file.
+- The token value never appears in any log line, audit entry, trace metadata, Prometheus output, or MC payload. Tested in `tests/orchestrator/control-plane.test.ts`.
+
 ## Verifying Defenses
 
 The test suite is organized to let a reviewer verify each mitigation in isolation:
@@ -113,5 +150,6 @@ The test suite is organized to let a reviewer verify each mitigation in isolatio
 - `tests/sanitizer.test.ts` — `flag` / `strip` / `block` modes, multi-injection handling, repeated-payload stripping.
 - `tests/path-guard.test.ts` — valid paths, traversal, encoded separators, null bytes, symlink escape, Windows-style rejection, edge cases.
 - `tests/allowlist.test.ts` — exact match, wildcard semantics, case sensitivity, malformed-config fail-closed behavior, `**` bypass guard.
+- `tests/orchestrator/session-registry.test.ts`, `tests/orchestrator/control-plane.test.ts`, `tests/server-per-session-allowlist.test.ts` — per-session allowlist + control-plane HTTP gate (Tier 1.3 / #56).
 
 Run `npm test` inside the sbx sandbox (see [development](./development.md)) after any change under `src/security/` or `src/mcp-proxy/sanitizer.ts`.
