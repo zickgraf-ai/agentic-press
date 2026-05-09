@@ -9,3 +9,4 @@ coverage/
 .DS_Store
 .sbx/
 .playwright-mcp/
+.improvements/metrics/
