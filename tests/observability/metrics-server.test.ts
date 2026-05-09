@@ -83,6 +83,38 @@ describe("metrics HTTP server", () => {
       expect(parseInt(match[1]!, 10)).toBeGreaterThanOrEqual(3);
     }
   });
+
+  // ── Tier 1.2 (#53) — agentType label end-to-end ─────────────────────────
+  // These tests pin the contract between the server's `safeRecord(undefined)`
+  // call and the actual Prometheus output. If someone removes the
+  // `?? AGENT_TYPE_UNSPECIFIED` fallback the unspecified test below catches it;
+  // if someone drops the `agentType` from the labelNames array the explicit
+  // test fails because the label cannot appear in the output.
+
+  it("recordRequest with no agentType emits the AGENT_TYPE_UNSPECIFIED sentinel label", async () => {
+    recorder.recordRequest("Read", "allowed", 5);
+    const res = await fetch(url);
+    const body = await res.text();
+    expect(body).toMatch(/mcp_proxy_requests_total\{[^}]*agentType="unspecified"[^}]*\}/);
+  });
+
+  it("recordRequest with explicit agentType emits the corresponding label value", async () => {
+    recorder.recordRequest("Read", "allowed", 5, "reviewer");
+    recorder.recordRequest("Read", "allowed", 7, "coder");
+    const res = await fetch(url);
+    const body = await res.text();
+    expect(body).toMatch(/mcp_proxy_requests_total\{[^}]*agentType="reviewer"[^}]*\}/);
+    expect(body).toMatch(/mcp_proxy_requests_total\{[^}]*agentType="coder"[^}]*\}/);
+  });
+
+  it("histogram emits the agentType label too (so duration queries can group by agent)", async () => {
+    recorder.recordRequest("Read", "allowed", 5, "reviewer");
+    const res = await fetch(url);
+    const body = await res.text();
+    // Histograms emit _bucket lines; assert the agentType label appears on at
+    // least one bucket line for the reviewer series.
+    expect(body).toMatch(/mcp_proxy_request_duration_seconds_bucket\{[^}]*agentType="reviewer"[^}]*\}/);
+  });
 });
 
 describe("metrics HTTP server — error path", () => {

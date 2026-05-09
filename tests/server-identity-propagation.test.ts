@@ -200,6 +200,46 @@ describe("Tier 1.2 — identity propagation through audit / events / metrics", (
     });
   });
 
+  describe("Outer-catch path", () => {
+    // The proxy hoists sessionId/agentType to the request-handler closure
+    // specifically so the outer-catch's audit() call still sees identity.
+    // This test anchors that behaviour — a future refactor that re-introduces
+    // `const` inside the try block would silently produce identity-less
+    // audit entries on error paths and this assertion would catch it.
+    it("identity is included in audit entries emitted from the outer-catch (sync bridge throw)", async () => {
+      // A bridge whose .call() throws synchronously short-circuits the
+      // promise machinery and lands in the outer try/catch.
+      const throwingBridge = {
+        call: () => { throw new Error("sync bridge explosion"); },
+        shutdown: async () => {},
+      } as unknown as StdioBridge;
+
+      // Spin up a dedicated server with the throwing bridge; the shared
+      // beforeEach's bridge does not throw, so we replace it here.
+      await closeServer(server);
+      const started = await startServer(makeConfig({
+        bridge: throwingBridge,
+        serverRoutes: { Read: "fs" },
+        eventBridge,
+        recorder,
+      }));
+      server = started.server;
+      url = started.url;
+
+      auditEntries.length = 0;
+      await mcpCall(url, 99, "Read", { path: "./pkg.json" }, {
+        "X-Agent-Session-Id": "task-outer-catch",
+        "X-Agent-Type": "coder",
+      });
+      const errorEntry = auditEntries.find(
+        (e: unknown) => (e as AuditEntry).status === "error"
+      ) as AuditEntry | undefined;
+      expect(errorEntry).toBeDefined();
+      expect(errorEntry!.sessionId).toBe("task-outer-catch");
+      expect(errorEntry!.agentType).toBe("coder");
+    });
+  });
+
   describe("MetricsRecorder agentType label", () => {
     it("recordRequest receives agentType as the 4th positional arg when X-Agent-Type is sent", async () => {
       await mcpCall(url, 20, "Read", { path: "./pkg.json" }, { "X-Agent-Type": "reviewer" });

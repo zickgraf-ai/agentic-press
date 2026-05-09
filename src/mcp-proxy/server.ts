@@ -260,10 +260,8 @@ export function createProxyServer(config: ProxyServerConfig): Express {
       // The block-reason label still distinguishes WHY it was blocked.
       const toolLabel = entry.status === "blocked" ? "_blocked" : entry.tool;
       try {
-        // Tier 1.2 (#53): pass entry.agentType through as a Prometheus label.
-        // The recorder maps undefined → AGENT_TYPE_UNSPECIFIED so every series
-        // carries the same label set regardless of whether the identity
-        // header was sent.
+        // entry.agentType becomes a Prometheus label; the recorder maps
+        // undefined → AGENT_TYPE_UNSPECIFIED (see `src/observability/metrics.ts`).
         recorder.recordRequest(toolLabel, entry.status, entry.durationMs ?? 0, entry.agentType);
       } catch (err) {
         reqLog.warn({ err }, "recorder.recordRequest threw (ignored)");

@@ -21,19 +21,19 @@ export interface ActivityEvent {
   readonly flags?: readonly string[];
   readonly errorMessage?: string;
   /**
-   * Phase 2 Tier 1.2 (#53): per-agent identity. Both optional. When set,
-   * `agentType` becomes MC's `agent_name` so the Tasks / Activity panels can
-   * demultiplex per agent role; `sessionId` is included in the event payload
-   * so MC can group activity by session.
+   * Per-agent identity propagated from the proxy's request envelope (#53).
+   * `sessionId` identifies a specific run/task; `agentType` identifies the
+   * role (e.g. "reviewer", "coder"). Both optional — Phase 1 single-agent
+   * deployments emit events with neither.
    */
   readonly sessionId?: string;
   readonly agentType?: string;
 }
 
 /**
- * Default agent name MC sees when an event has no agentType. Kept here as a
- * single export so the upcoming MC connection adapter (Tier 2.A) can register
- * with the same name and the kanban board attribution stays consistent.
+ * Agent name attributed to events with no `agentType`. Exported so the
+ * planned MC connection adapter can register under the same name and the
+ * board attribution stays consistent.
  */
 export const DEFAULT_AGENT_NAME = "agentic-press-proxy";
 
@@ -142,15 +142,6 @@ export function createMissionControlAdapter(
       // MC's /api/hermes/events is the write endpoint for agent lifecycle
       // events — it persists to the activities table and broadcasts via SSE.
       // /api/activities is read-only (405 on POST).
-      //
-      // Tier 1.2 identity propagation:
-      //   - agent_name uses event.agentType when set so MC's panels show
-      //     per-role activity (e.g. all "reviewer" activity grouped). Falls
-      //     back to DEFAULT_AGENT_NAME when no agent type was passed —
-      //     preserves Phase 1 behaviour for headerless callers.
-      //   - data.session_id carries event.sessionId when set so MC can group
-      //     events by task/session in its Activity views. Omitted entirely
-      //     when absent (no `session_id: undefined` noise).
       await safeFetch(`${config.url}/api/hermes/events`, {
         method: "POST",
         headers: headers(),
