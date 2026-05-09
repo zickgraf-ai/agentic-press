@@ -71,6 +71,22 @@ npm run dev          # Start MCP proxy (tsx)
 
 See @.learnings/LEARNING_INDEX.md for lessons learned from previous sessions.
 
+## Vendored skills — Superpowers cherry-pick (#55 trial through 2026-05-30)
+
+Five skills from [obra/superpowers](https://github.com/obra/superpowers) (MIT-licensed) are vendored under `.claude/skills/` for a 3-week trial:
+
+- `systematic-debugging` — 4-phase root cause discipline (no analog; high value for MCP-proxy / security bugs)
+- `brainstorming` — Socratic spec refinement; visual companion sub-feature dropped to reduce attack surface
+- `verification-before-completion` — evidence-before-claims gate
+- `writing-skills` — meta-skill for authoring skills (exempt from auto-drop signal)
+- `subagent-driven-development` — fresh-subagent-per-task + 2-stage review
+
+Cross-references rewritten for this project (CLAUDE.md TDD requirement, sbx worktree flow, `pr-review-toolkit`, `~/Obsidian/claude-workspace/Plans/`). MIT notice at `.claude/skills/SUPERPOWERS_LICENSE.md`; per-skill provenance footers in each SKILL.md.
+
+Weekly metrics dashboard at `.improvements/metrics/skill-usage-YYYY-MM-DD.md` (gitignored, regenerated each sweep). Trial criteria + decision rules in `.improvements/README.md` *Skill-usage metrics* section. Decision date: **2026-05-30**.
+
+Run on demand: `npm run sweep-skill-metrics`. Schedule weekly via `./scripts/install-skill-metrics-cron.sh`.
+
 ## Self-improvement system (#20)
 
 Two directories hold reflective content:
