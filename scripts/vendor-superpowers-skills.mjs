@@ -6,7 +6,7 @@
 // Usage:
 //   SUPERPOWERS_SOURCE=/tmp/superpowers-research node scripts/vendor-superpowers-skills.mjs
 
-import { readFileSync, writeFileSync, mkdirSync, copyFileSync, chmodSync, existsSync, rmSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdirSync, chmodSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 
 const REPO_ROOT = process.cwd();
@@ -134,16 +134,14 @@ const PER_FILE_REWRITES = {
       /\*\*REQUIRED BACKGROUND:\*\* The the project's TDD requirement \(see `CLAUDE\.md` \*Development Workflow\*: "TDD required"\) skill explains why this matters\./,
       "**REQUIRED BACKGROUND:** the project's TDD discipline (`CLAUDE.md` *Development Workflow*) explains why this matters.",
     ],
-    // Cross-reference example block — the original used `superpowers:test-driven-development` and `superpowers:systematic-debugging`
-    // as illustrative cross-ref names. Generic rewrite expanded TDD into a verbose phrase, breaking the illustrative point.
-    // Restore short, illustrative project-scoped examples.
+    // Cross-reference example block — the original used `superpowers:test-driven-development`
+    // as the illustrative cross-ref name. Generic rewrite expanded TDD into a verbose phrase,
+    // breaking the illustrative point. Restore a short, illustrative project-scoped example.
+    // (The sibling `superpowers:systematic-debugging` example is handled by the generic rewrite
+    // alone — it becomes bare `systematic-debugging`, which still illustrates the pattern.)
     [
       /- ✅ Good: `\*\*REQUIRED SUB-SKILL:\*\* Use the project's TDD requirement \(see `CLAUDE\.md` \*Development Workflow\*: "TDD required"\)`/,
       "- ✅ Good: `**REQUIRED SUB-SKILL:** Use verification-before-completion`",
-    ],
-    [
-      /- ✅ Good: `\*\*REQUIRED BACKGROUND:\*\* You MUST understand systematic-debugging`/,
-      "- ✅ Good: `**REQUIRED BACKGROUND:** You MUST understand systematic-debugging`",
     ],
   ],
   "skills/writing-skills/testing-skills-with-subagents.md": [],
@@ -155,9 +153,9 @@ const PER_FILE_REWRITES = {
       "## When to Use\n\nUse this skill when you have an implementation plan with mostly independent tasks. Skip if tasks are tightly coupled (use manual execution and `brainstorming` first to refine the plan).\n\n",
     ],
     // Flowchart "Use superpowers:..." terminal node was rewritten by the generic rule into a long label.
-    // Shorten so the digraph reads cleanly.
+    // Shorten so the digraph reads cleanly. Note the leading "Use " prefix that the generic rule preserves.
     [
-      /"the project's PR workflow per `CLAUDE\.md` \*Cleanup after merge\*: `gh pr create --draft` → `pr-review-toolkit:review-pr` → mark ready → merge → `sbx rm <name>` \+ worktree prune"/g,
+      /"Use the project's PR workflow per `CLAUDE\.md` \*Cleanup after merge\*: `gh pr create --draft` → `pr-review-toolkit:review-pr` → mark ready → merge → `sbx rm <name>` \+ worktree prune"/g,
       '"Finish via project PR workflow (CLAUDE.md cleanup)"',
     ],
     // Drop the "vs. Executing Plans:" subsection within the Advantages block.
@@ -230,13 +228,32 @@ const REWRITTEN_FILES = [
   ["skills/subagent-driven-development/SKILL.md", "subagent-driven-development/SKILL.md", true],
 ];
 
-function rewrite(content, perFile) {
+/**
+ * Tracks which (filePath, patternIndex) pairs fired at least one substitution.
+ * Used by verify() to fail if an upstream content drift made one of our
+ * regex rewrites a silent no-op — without this, a stale pattern would
+ * compile fine and ship a partially-rewritten file.
+ */
+const rewriteFiringRecord = new Map();
+
+function recordFiring(srcPath, key) {
+  if (!rewriteFiringRecord.has(srcPath)) rewriteFiringRecord.set(srcPath, new Set());
+  rewriteFiringRecord.get(srcPath).add(key);
+}
+
+function rewrite(srcPath, content, perFile) {
   let out = content;
-  for (const [pattern, replacement] of GENERIC_REWRITES) {
+  for (let i = 0; i < GENERIC_REWRITES.length; i++) {
+    const [pattern, replacement] = GENERIC_REWRITES[i];
+    const before = out;
     out = out.replace(pattern, replacement);
+    if (out !== before) recordFiring(srcPath, `generic:${i}`);
   }
-  for (const [pattern, replacement] of perFile) {
+  for (let i = 0; i < perFile.length; i++) {
+    const [pattern, replacement] = perFile[i];
+    const before = out;
     out = out.replace(pattern, replacement);
+    if (out !== before) recordFiring(srcPath, `per-file:${i}`);
   }
   return out;
 }
@@ -245,11 +262,27 @@ function ensureDir(filePath) {
   mkdirSync(dirname(filePath), { recursive: true });
 }
 
+/**
+ * Write `content` to `dstAbs` only if the file is missing or its current
+ * content differs. This makes the vendor script truly idempotent — re-running
+ * with unchanged inputs preserves mtime, which is critical because the
+ * skill-usage trial uses SKILL.md mtime as the trial-age clock.
+ */
+function writeIfChanged(dstAbs, content) {
+  ensureDir(dstAbs);
+  if (existsSync(dstAbs)) {
+    const existing = readFileSync(dstAbs, "utf8");
+    if (existing === content) return false;
+  }
+  writeFileSync(dstAbs, content, "utf8");
+  return true;
+}
+
 function copyVerbatim(src, dst) {
   const srcAbs = join(SOURCE, src);
   const dstAbs = join(DEST, dst);
-  ensureDir(dstAbs);
-  copyFileSync(srcAbs, dstAbs);
+  const content = readFileSync(srcAbs, "utf8");
+  writeIfChanged(dstAbs, content);
   return dstAbs;
 }
 
@@ -262,14 +295,13 @@ function copyExecutable(src, dst) {
 function writeRewritten(src, dst, withProvenance) {
   const srcAbs = join(SOURCE, src);
   const dstAbs = join(DEST, dst);
-  ensureDir(dstAbs);
   const content = readFileSync(srcAbs, "utf8");
   const perFile = PER_FILE_REWRITES[src] ?? [];
-  let rewritten = rewrite(content, perFile);
+  let rewritten = rewrite(src, content, perFile);
   if (withProvenance) {
     rewritten = rewritten.replace(/\s+$/, "") + "\n" + PROVENANCE;
   }
-  writeFileSync(dstAbs, rewritten, "utf8");
+  writeIfChanged(dstAbs, rewritten);
   return dstAbs;
 }
 
@@ -277,14 +309,13 @@ function writeLicense() {
   const sourceLicense = readFileSync(join(SOURCE, "LICENSE"), "utf8");
   const dstAbs = join(DEST, "SUPERPOWERS_LICENSE.md");
   const content = `# Superpowers — Vendored Skills License\n\nThe following skills under \`.claude/skills/\` are vendored (with cross-reference rewrites) from [obra/superpowers](https://github.com/obra/superpowers) commit \`${SHA}\`, retrieved on ${VENDOR_DATE}:\n\n- \`systematic-debugging/\`\n- \`brainstorming/\`\n- \`verification-before-completion/\`\n- \`writing-skills/\`\n- \`subagent-driven-development/\`\n\nUpstream license (MIT) reproduced verbatim below.\n\n---\n\n${sourceLicense}\n`;
-  ensureDir(dstAbs);
-  writeFileSync(dstAbs, content, "utf8");
+  writeIfChanged(dstAbs, content);
   return dstAbs;
 }
 
 function verify() {
   const errors = [];
-  for (const [, dst, withProvenance] of REWRITTEN_FILES) {
+  for (const [src, dst, withProvenance] of REWRITTEN_FILES) {
     const dstAbs = join(DEST, dst);
     const content = readFileSync(dstAbs, "utf8");
     if (/\bsuperpowers:[a-z][a-z0-9-]*/.test(content)) {
@@ -293,6 +324,22 @@ function verify() {
     }
     if (withProvenance && !content.includes("## Provenance")) {
       errors.push(`${dst}: missing provenance footer`);
+    }
+
+    // Each entry in PER_FILE_REWRITES must fire at least once. A pattern that
+    // no longer matches usually means upstream content drifted — surface it
+    // as an error so we re-author the rewrite rather than silently shipping
+    // a partially-rewritten file.
+    const perFile = PER_FILE_REWRITES[src] ?? [];
+    const fired = rewriteFiringRecord.get(src) ?? new Set();
+    const noFire = [];
+    for (let i = 0; i < perFile.length; i++) {
+      if (!fired.has(`per-file:${i}`)) noFire.push(i);
+    }
+    if (noFire.length > 0) {
+      errors.push(
+        `${src}: PER_FILE_REWRITES indexes ${noFire.join(", ")} did not fire — upstream may have drifted, re-author the patterns`
+      );
     }
   }
   return errors;

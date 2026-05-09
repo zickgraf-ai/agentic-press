@@ -41,7 +41,7 @@ digraph process {
     "Read plan, extract all tasks with full text, note context, create TodoWrite" [shape=box];
     "More tasks remain?" [shape=diamond];
     "Dispatch final code reviewer subagent for entire implementation" [shape=box];
-    "Use the project's PR workflow per `CLAUDE.md` *Cleanup after merge*: `gh pr create --draft` → `pr-review-toolkit:review-pr` → mark ready → merge → `sbx rm <name>` + worktree prune" [shape=box style=filled fillcolor=lightgreen];
+    "Finish via project PR workflow (CLAUDE.md cleanup)" [shape=box style=filled fillcolor=lightgreen];
 
     "Read plan, extract all tasks with full text, note context, create TodoWrite" -> "Dispatch implementer subagent (./implementer-prompt.md)";
     "Dispatch implementer subagent (./implementer-prompt.md)" -> "Implementer subagent asks questions?";
@@ -60,7 +60,7 @@ digraph process {
     "Mark task complete in TodoWrite" -> "More tasks remain?";
     "More tasks remain?" -> "Dispatch implementer subagent (./implementer-prompt.md)" [label="yes"];
     "More tasks remain?" -> "Dispatch final code reviewer subagent for entire implementation" [label="no"];
-    "Dispatch final code reviewer subagent for entire implementation" -> "Use the project's PR workflow per `CLAUDE.md` *Cleanup after merge*: `gh pr create --draft` → `pr-review-toolkit:review-pr` → mark ready → merge → `sbx rm <name>` + worktree prune";
+    "Dispatch final code reviewer subagent for entire implementation" -> "Finish via project PR workflow (CLAUDE.md cleanup)";
 }
 ```
 
