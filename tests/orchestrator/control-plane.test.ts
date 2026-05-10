@@ -138,6 +138,30 @@ describe("Control-plane HTTP server", () => {
     expect(registry.size()).toBe(0);
   });
 
+  it("POST /sessions rejects allowedTools entries containing control chars / null bytes / unicode (F11)", async () => {
+    const evilPatterns: string[] = [
+      "Read\x00bypass",          // null byte
+      "Read\nWrite",              // newline
+      "Read\rWrite",              // carriage return
+      "Read\tWrite",              // tab
+      "Read​Write",          // zero-width space
+      "Read﻿Write",          // BOM / zero-width no-break space
+      "Read Write",               // plain space
+      "Read;Write",               // shell metachar
+      "Read|Write",               // pipe
+      "<script>",                 // angle brackets
+    ];
+    for (const pattern of evilPatterns) {
+      const res = await fetch(`${baseUrl}/sessions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
+        body: JSON.stringify({ sessionId: "ok", agentType: "reviewer", allowedTools: [pattern] }),
+      });
+      expect(res.status, `pattern ${JSON.stringify(pattern)} should be rejected`).toBe(400);
+    }
+    expect(registry.size()).toBe(0);
+  });
+
   it("POST /sessions accepts prefix wildcards (e.g. echo__*) — only bare catch-alls are rejected", async () => {
     const res = await fetch(`${baseUrl}/sessions`, {
       method: "POST",
@@ -246,6 +270,21 @@ describe("Control-plane HTTP server", () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as { status: string };
     expect(body.status).toBe("ok");
+  });
+
+  it("undefined paths return JSON 404 (not Express's default HTML), F13", async () => {
+    const res = await fetch(`${baseUrl}/admin`, {
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    expect(res.status).toBe(404);
+    const ct = res.headers.get("content-type") ?? "";
+    expect(ct).toMatch(/application\/json/i);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toBe("Not found");
+    // The default Express HTML 404 reflects the requested path in the body.
+    // Our JSON 404 must not echo the path back.
+    const text = JSON.stringify(body);
+    expect(text).not.toContain("/admin");
   });
 
   it("successful POST /sessions writes an audit entry with direction='control-plane' + structured fields (NOT tool names)", async () => {

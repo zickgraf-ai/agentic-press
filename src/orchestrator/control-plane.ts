@@ -38,6 +38,17 @@ const log = childLogger("control-plane");
 
 const SESSION_ID_PATTERN = /^[A-Za-z0-9._-]+$/;
 const AGENT_TYPE_PATTERN = /^[A-Za-z0-9._-]+$/;
+/**
+ * Charset for allowedTools entries. Adds `*` (wildcard) on top of the
+ * sessionId/agentType charset since matchesPattern() supports prefix-suffix
+ * wildcards. Rejecting other characters closes a class of injection
+ * vectors — null bytes, newlines, zero-width unicode (U+200B/FEFF/200D),
+ * control characters — that would otherwise round-trip through any future
+ * code path that logs or serialises pattern values. Today only the count
+ * is recorded in audit, but this charset is the contract for future
+ * surfaces (e.g. richer audit logging, MC display).
+ */
+const ALLOWLIST_PATTERN_CHARSET = /^[A-Za-z0-9._*-]+$/;
 const SESSION_ID_MAX_LEN = 128;
 const AGENT_TYPE_MAX_LEN = 32;
 const ALLOWLIST_PATTERN_MAX_LEN = 256;
@@ -113,6 +124,12 @@ function validateRegisterPayload(body: unknown): { ok: true; value: RegisterPayl
   for (const t of allowedTools) {
     if (typeof t !== "string" || t.length === 0 || t.length > ALLOWLIST_PATTERN_MAX_LEN) {
       return { ok: false, error: "Invalid allowedTools — every entry must be a non-empty string within length bounds" };
+    }
+    if (!ALLOWLIST_PATTERN_CHARSET.test(t)) {
+      return {
+        ok: false,
+        error: "Invalid allowedTools — entries must match [A-Za-z0-9._*-]+ (no whitespace, control chars, null bytes, or unicode)",
+      };
     }
     // Reject bare catch-alls. Per-session allowlists exist to enforce
     // least-privilege per agent; a bare "*" / "**" pattern grants unrestricted
@@ -244,6 +261,14 @@ export function createControlPlaneServer(config: ControlPlaneServerConfig): Expr
       registeredAt: entry.registeredAt,
     }));
     res.json(list);
+  });
+
+  // JSON 404 catch-all. Express's default 404 returns HTML that reflects the
+  // requested path in the response body. The control-plane API is otherwise
+  // JSON throughout, so an authenticated probe to an undefined route should
+  // get a JSON error instead of an HTML page that echoes path content.
+  app.use((_req: Request, res: Response) => {
+    res.status(404).json({ error: "Not found" });
   });
 
   // Global error handler — never let an unhandled error leak the token (the
