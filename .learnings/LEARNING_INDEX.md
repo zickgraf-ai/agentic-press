@@ -8,3 +8,4 @@ Lessons learned from previous sessions. Each entry links to a detailed learning 
 | 2026-04-05 | tooling | Claude Code in sbx requires `/login` for Max subscription auth — otherwise bills per-token | [link](2026-04-05_sbx-login-for-max-auth.md) |
 | 2026-04-05 | architecture | sbx claude agent may mount parent directory as workspace, not the specified subdirectory | [link](2026-04-05_sbx-workspace-mount-scope.md) |
 | 2026-04-06 | architecture | MCP SSE transport is deprecated — use Streamable HTTP only, never implement SSE | [link](2026-04-06_mcp-sse-deprecated.md) |
+| 2026-05-09 | process | Vendored-skill trials need pre-defined success criteria + instrumentation, not calendar prompts (Superpowers cherry-pick #55) | [link](2026-05-09_superpowers-cherrypick-criteria.md) |

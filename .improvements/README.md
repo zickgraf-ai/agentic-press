@@ -27,6 +27,7 @@ The MVP reads only the audit NDJSON. Future categories will pull in additional i
 |---|---|
 | `allowlist-drift` | Same tool blocked ≥3 times across recent sessions |
 | `tool-failure` | Same tool returned `status=error` ≥3 times |
+| `skill-usage` | Vendored skill never invoked after 14d grace, OR ≥3 invocations with ≥50% abandonment |
 
 Future categories (bridge timeout, token-heavy session, stale setup commands) plug in as additional grouping passes — see `src/improvements/detector.ts`.
 
@@ -80,6 +81,46 @@ Mission Control's Memory Browser can render this directory as a tree view if you
 - **Nothing in `.improvements/` is auto-loaded into agent context.** CLAUDE.md describes the directory's *existence and workflow*, but doesn't include suggestion contents — the `@.learnings/LEARNING_INDEX.md` import is the only auto-loaded reflective content.
 - **Memory poisoning vector closed by design.** The agent observes; the human decides; only human-merged PRs propagate effects.
 - **Trust boundary unchanged.** Files in `.improvements/` have the same trust as any other tracked file in the repo — i.e., none until you read and merge them.
+
+## Skill-usage metrics (#55 trial)
+
+The 5 vendored Superpowers skills under `.claude/skills/` are on a 3-week trial. Each weekly sweep produces a regenerated dashboard at `.improvements/metrics/skill-usage-YYYY-MM-DD.md` (gitignored — local only) and writes anti-signal Suggestions for never-used or high-abandonment skills using the `skill-usage` category above.
+
+Inputs:
+- Vendored skills are detected by the `## Provenance` footer in their `SKILL.md` (so project-authored skills aren't mixed in).
+- Skill invocations come from Claude Code session transcripts at `~/.claude/projects/<encoded-cwd>/*.jsonl`. The parser counts top-level `Skill` tool_use events (skips `caller.type === "skill"` nested calls) and classifies each by the next-N-turns heuristic (`src/improvements/skill-transcript.ts`).
+
+Run on demand:
+
+```bash
+npm run sweep-skill-metrics
+```
+
+Or schedule weekly via the macOS launchd job:
+
+```bash
+./scripts/install-skill-metrics-cron.sh   # Mondays 09:00 local
+```
+
+### Trial criteria (decision date 2026-05-30)
+
+| Skill | KEEP | DROP | Notes |
+|---|---|---|---|
+| `systematic-debugging` | ≥3 sessions, completion ≥70% | <2 invocations after 14d | |
+| `brainstorming` | ≥2 sessions, completion ≥70% | <2 invocations after 14d | |
+| `verification-before-completion` | ≥5 invocations | <2 invocations after 14d | High-frequency reflexive skill — low bar |
+| `writing-skills` | (measure only) | (measure only) | Meta-skill, exempt from auto-drop |
+| `subagent-driven-development` | ≥2 sessions, completion ≥70% | <2 invocations after 14d | |
+
+A skill that fires its `skill-usage` Suggestion in week 2 AND week 3 is auto-flagged DROP in the week-3 report. The drop action is human-driven (`git rm -r .claude/skills/<name>` + CLAUDE.md update). Verdicts in the report (`KEEP`/`DROP`/`MEASURE`/`UNDECIDED`) are recommendations, not automatic actions.
+
+### Source-of-truth files
+
+- Detector: `src/improvements/detector.ts:detectSkillUsageImprovements`
+- Parser: `src/improvements/skill-transcript.ts`
+- Report: `src/improvements/skill-usage-report.ts`
+- Sweep wiring: `scripts/sweep-improvements.mjs` (Phase 2 block)
+- Trial criteria: this file (above) + per-skill rules in `src/improvements/skill-usage-report.ts:VERDICT_RULES`
 
 ## Relationship to `.learnings/`
 

@@ -12,6 +12,7 @@
     "lint": "eslint src/ tests/",
     "typecheck": "tsc --noEmit",
     "sweep-improvements": "tsx scripts/sweep-improvements.mjs",
+    "sweep-skill-metrics": "tsx scripts/sweep-improvements.mjs --skip-audit",
     "address-improvement": "node scripts/address-improvement.mjs"
   },
   "keywords": [

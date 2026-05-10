@@ -1,38 +1,59 @@
 #!/usr/bin/env -S npx tsx
 /**
- * Self-improvement sweep — issue #20.
+ * Self-improvement sweep — issue #20 + #55.
  *
  * NOTE: shebang uses `npx tsx` because this script imports .ts modules
  * directly. Run via `npm run sweep-improvements` (recommended) or
  * `npx tsx scripts/sweep-improvements.mjs` (also works).
  *
- * Reads NDJSON audit log lines from a file (or stdin), analyzes them for
- * patterns that warrant human review, and writes new markdown files to
- * `.improvements/`. Idempotent — re-running on the same day with the same
- * audit log is a no-op.
+ * Two phases:
+ *  1. Audit: reads NDJSON audit log lines from a file (or piped stdin),
+ *     analyzes them for tool-related patterns (allowlist drift, tool
+ *     failures), writes Suggestions to `.improvements/`.
+ *  2. Skill metrics: reads Claude Code session transcripts under
+ *     `~/.claude/projects/<encoded-cwd>/`, computes per-skill usage
+ *     metrics for the vendored skills, writes a regenerated dashboard
+ *     `.improvements/metrics/skill-usage-YYYY-MM-DD.md`, and writes
+ *     anti-signal Suggestions for never-used or high-abandonment skills.
+ *
+ * The two phases are isolated in try/catch — one failing does not block
+ * the other.
  *
  * Usage:
- *   ./scripts/sweep-improvements.mjs [--input <audit.ndjson>] [--dir <improvements-dir>] [--max <N>]
+ *   ./scripts/sweep-improvements.mjs [--input <audit.ndjson>] [--dir <improvements-dir>]
+ *                                    [--max <N>] [--skip-audit] [--skip-skill-metrics]
+ *                                    [--session-log-dir <path>] [--skills-dir <path>]
+ *                                    [--lookback-days <N>]
  *   cat audit.ndjson | ./scripts/sweep-improvements.mjs
  *
  * Defaults:
- *   --input    stdin
- *   --dir      .improvements
- *   --max      3   (hard cap on suggestions written per run; bail-out so a
- *                   bad trigger can't flood the directory)
+ *   --input             stdin (skipped if no --input AND stdin is a TTY)
+ *   --dir               .improvements
+ *   --max               3   (hard cap on Suggestions written per run)
+ *   --session-log-dir   auto (resolved from process.cwd() encoding)
+ *   --skills-dir        .claude/skills
+ *   --lookback-days     30
  *
  * Security: this script writes files to the repo. It does not commit, push,
  * or modify any other files. Output is reviewed by the human before any
  * effect propagates further.
  */
 
-import { readFileSync } from "node:fs";
-import { resolve } from "node:path";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { join, resolve } from "node:path";
 
 // Imported as .ts — requires tsx (see shebang and the npm script wrapper).
-const { detectImprovements } = await import("../src/improvements/detector.ts");
+const { detectImprovements, detectSkillUsageImprovements } = await import(
+  "../src/improvements/detector.ts"
+);
 const { writeSuggestion, isDuplicate, generateSuggestionId } = await import(
   "../src/improvements/writer.ts"
+);
+const { collectInvocations, findSessionLogDir } = await import(
+  "../src/improvements/skill-transcript.ts"
+);
+const { readVendoredSkills, computeMetrics, renderReport, reportFileName } = await import(
+  "../src/improvements/skill-usage-report.ts"
 );
 
 const args = process.argv.slice(2);
@@ -40,6 +61,11 @@ const opts = {
   input: argValue("--input"),
   dir: argValue("--dir") ?? ".improvements",
   max: parseInt(argValue("--max") ?? "3", 10),
+  skipAudit: argFlag("--skip-audit"),
+  skipSkillMetrics: argFlag("--skip-skill-metrics"),
+  sessionLogDir: argValue("--session-log-dir"),
+  skillsDir: argValue("--skills-dir") ?? ".claude/skills",
+  lookbackDays: parseInt(argValue("--lookback-days") ?? "30", 10),
 };
 
 function argValue(name) {
@@ -47,11 +73,112 @@ function argValue(name) {
   return idx >= 0 && idx + 1 < args.length ? args[idx + 1] : undefined;
 }
 
-function readInput() {
-  if (opts.input) return readFileSync(resolve(opts.input), "utf8");
-  // stdin
-  return readFileSync(0, "utf8");
+function argFlag(name) {
+  return args.includes(name);
 }
+
+const dir = resolve(opts.dir);
+const now = new Date();
+
+let auditWritten = 0;
+let auditSkipped = 0;
+let skillMetricsWritten = 0;
+let skillMetricsSkipped = 0;
+
+// ---- Phase 1: Audit ----
+if (!opts.skipAudit) {
+  const stdinIsTTY = process.stdin.isTTY;
+  if (!opts.input && stdinIsTTY) {
+    console.log("[sweep] no --input and stdin is a TTY — skipping audit phase. Use --input <file> to enable.");
+  } else {
+    try {
+      const text = opts.input ? readFileSync(resolve(opts.input), "utf8") : readFileSync(0, "utf8");
+      const entries = parseEntries(text);
+      console.log(`[sweep:audit] read ${entries.length} audit entries`);
+      const suggestions = detectImprovements(entries);
+      console.log(`[sweep:audit] detected ${suggestions.length} candidate suggestions`);
+      for (const s of suggestions) {
+        if (auditWritten >= opts.max) {
+          console.log(`[sweep:audit] reached --max=${opts.max} cap, stopping`);
+          break;
+        }
+        const id = generateSuggestionId(s, now);
+        if (isDuplicate(dir, id)) {
+          auditSkipped++;
+          continue;
+        }
+        writeSuggestion(dir, s, now);
+        console.log(`[sweep:audit] wrote ${id}.md  (${s.category}, ${s.confidence})`);
+        auditWritten++;
+      }
+    } catch (err) {
+      console.error(`[sweep:audit] FAILED: ${err.message}`);
+      if (err.stack) console.error(err.stack);
+    }
+  }
+}
+
+// ---- Phase 2: Skill metrics ----
+if (!opts.skipSkillMetrics) {
+  try {
+    const sessionLogDir = opts.sessionLogDir ?? findSessionLogDir(process.cwd());
+    const skillsDir = resolve(opts.skillsDir);
+    const lookbackMs = opts.lookbackDays * 24 * 60 * 60 * 1000;
+    const windowStart = new Date(now.getTime() - lookbackMs).toISOString();
+    const windowEnd = now.toISOString();
+
+    const skills = readVendoredSkills(skillsDir);
+    if (skills.length === 0) {
+      console.log(`[sweep:skill] no vendored skills found in ${skillsDir} — skipping skill-metrics phase`);
+    } else {
+      const { invocations, parseStats } = collectInvocations(sessionLogDir, windowStart);
+      const sessionsAnalyzed = new Set(invocations.map((i) => i.sessionId)).size;
+
+      // Write the always-regenerated dashboard.
+      const metrics = computeMetrics(
+        invocations,
+        skills,
+        sessionsAnalyzed,
+        windowStart,
+        windowEnd,
+        now,
+        parseStats
+      );
+      const metricsDir = join(dir, "metrics");
+      if (!existsSync(metricsDir)) mkdirSync(metricsDir, { recursive: true });
+      const reportPath = join(metricsDir, reportFileName(now));
+      writeFileSync(reportPath, renderReport(metrics), "utf8");
+      console.log(
+        `[sweep:skill] wrote ${reportPath} (${skills.length} skills, ${invocations.length} invocations across ${sessionsAnalyzed} sessions; parsed ${parseStats.totalLines} lines, ${parseStats.malformedLines} malformed)`
+      );
+
+      // Run anti-signal detector.
+      const skillSuggestions = detectSkillUsageImprovements(invocations, skills, { now });
+      console.log(`[sweep:skill] detected ${skillSuggestions.length} candidate suggestions`);
+      for (const s of skillSuggestions) {
+        if (skillMetricsWritten + auditWritten >= opts.max) {
+          console.log(`[sweep:skill] reached --max=${opts.max} cap (combined with audit), stopping`);
+          break;
+        }
+        const id = generateSuggestionId(s, now);
+        if (isDuplicate(dir, id)) {
+          skillMetricsSkipped++;
+          continue;
+        }
+        writeSuggestion(dir, s, now);
+        console.log(`[sweep:skill] wrote ${id}.md  (${s.category}, ${s.confidence})`);
+        skillMetricsWritten++;
+      }
+    }
+  } catch (err) {
+    console.error(`[sweep:skill] FAILED: ${err.message}`);
+    if (err.stack) console.error(err.stack);
+  }
+}
+
+console.log(
+  `[sweep] done — audit: wrote ${auditWritten}, skipped ${auditSkipped} | skill: wrote ${skillMetricsWritten}, skipped ${skillMetricsSkipped}`
+);
 
 function parseEntries(text) {
   const entries = [];
@@ -83,32 +210,3 @@ function parseEntries(text) {
   // Filter to actual audit entries (have status + tool fields)
   return entries.filter((e) => e && typeof e === "object" && "status" in e && "tool" in e);
 }
-
-const text = readInput();
-const entries = parseEntries(text);
-console.log(`[sweep] read ${entries.length} audit entries`);
-
-const suggestions = detectImprovements(entries);
-console.log(`[sweep] detected ${suggestions.length} candidate suggestions`);
-
-const dir = resolve(opts.dir);
-const now = new Date();
-let written = 0;
-let skipped = 0;
-
-for (const s of suggestions) {
-  if (written >= opts.max) {
-    console.log(`[sweep] reached --max=${opts.max} cap, stopping`);
-    break;
-  }
-  const id = generateSuggestionId(s, now);
-  if (isDuplicate(dir, id)) {
-    skipped++;
-    continue;
-  }
-  writeSuggestion(dir, s, now);
-  console.log(`[sweep] wrote ${id}.md  (${s.category}, ${s.confidence})`);
-  written++;
-}
-
-console.log(`[sweep] done — wrote ${written}, skipped ${skipped} (duplicates)`);
