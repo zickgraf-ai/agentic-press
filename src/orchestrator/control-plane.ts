@@ -1,8 +1,13 @@
 import express, { type Express, type Request, type Response, type NextFunction } from "express";
 import { timingSafeEqual } from "node:crypto";
 import { childLogger } from "../logger.js";
-import { logAuditEntry, type AuditEntry } from "../mcp-proxy/logger.js";
-import type { SessionRegistry } from "./session-registry.js";
+import { logAuditEntry } from "../mcp-proxy/logger.js";
+import {
+  SESSION_ID_PATTERN,
+  SESSION_ID_MAX_LEN,
+  validateSessionInput,
+  type SessionRegistry,
+} from "./session-registry.js";
 
 const log = childLogger("control-plane");
 
@@ -36,24 +41,6 @@ const log = childLogger("control-plane");
  * all see consistently bounded values.
  */
 
-const SESSION_ID_PATTERN = /^[A-Za-z0-9._-]+$/;
-const AGENT_TYPE_PATTERN = /^[A-Za-z0-9._-]+$/;
-/**
- * Charset for allowedTools entries. Adds `*` (wildcard) on top of the
- * sessionId/agentType charset since matchesPattern() supports prefix-suffix
- * wildcards. Rejecting other characters closes a class of injection
- * vectors — null bytes, newlines, zero-width unicode (U+200B/FEFF/200D),
- * control characters — that would otherwise round-trip through any future
- * code path that logs or serialises pattern values. Today only the count
- * is recorded in audit, but this charset is the contract for future
- * surfaces (e.g. richer audit logging, MC display).
- */
-const ALLOWLIST_PATTERN_CHARSET = /^[A-Za-z0-9._*-]+$/;
-const SESSION_ID_MAX_LEN = 128;
-const AGENT_TYPE_MAX_LEN = 32;
-const ALLOWLIST_PATTERN_MAX_LEN = 256;
-const ALLOWLIST_MAX_ENTRIES = 256;
-
 export interface ControlPlaneServerConfig {
   readonly registry: SessionRegistry;
   readonly token: string;
@@ -69,84 +56,102 @@ function tokenMatches(provided: string, expected: string): boolean {
   if (provided.length !== expected.length) return false;
   try {
     return timingSafeEqual(Buffer.from(provided), Buffer.from(expected));
-  } catch {
+  } catch (err) {
+    // timingSafeEqual is virtually unreachable on this path — same-length
+    // Buffers built from utf-8 strings shouldn't throw — but a silent `false`
+    // on an unexpected error would hide a real bug. Surface it via warn-log
+    // so operators see the failure mode if it ever fires. Still return false
+    // (treat as wrong token) so the auth contract is preserved.
+    log.warn({ err }, "tokenMatches: timingSafeEqual threw unexpectedly — treating as wrong token");
     return false;
   }
 }
 
-function emitControlPlaneAudit(entry: Omit<AuditEntry, "timestamp" | "tool" | "args" | "flags" | "status"> & {
-  readonly status?: AuditEntry["status"];
-}): void {
+/**
+ * Discriminated union for control-plane audit calls (F8). The compiler now
+ * enforces that register entries carry `allowedToolsCount` + `agentType`,
+ * and deregister entries do NOT. Previously a single Omit-based type
+ * accepted optional fields uniformly, so a deregister caller could mistakenly
+ * pass `allowedToolsCount` (or omit it on register) and TypeScript wouldn't
+ * catch it.
+ */
+export interface RegisterAuditFields {
+  readonly action: "register";
+  readonly sessionId: string;
+  readonly agentType: string;
+  readonly allowedToolsCount: number;
+  readonly remoteAddress: string;
+  readonly remotePort: number;
+}
+
+export interface DeregisterAuditFields {
+  readonly action: "deregister";
+  readonly sessionId: string;
+  readonly remoteAddress: string;
+  readonly remotePort: number;
+}
+
+export type ControlPlaneAuditFields = RegisterAuditFields | DeregisterAuditFields;
+
+function emitControlPlaneAudit(fields: ControlPlaneAuditFields): void {
   try {
-    logAuditEntry({
-      timestamp: new Date().toISOString(),
-      tool: "",
-      args: {},
-      status: entry.status ?? "allowed",
-      flags: [],
-      direction: "control-plane",
-      ...(entry.action !== undefined ? { action: entry.action } : {}),
-      ...(entry.sessionId !== undefined ? { sessionId: entry.sessionId } : {}),
-      ...(entry.agentType !== undefined ? { agentType: entry.agentType } : {}),
-      ...(entry.remoteAddress !== undefined ? { remoteAddress: entry.remoteAddress } : {}),
-      ...(entry.remotePort !== undefined ? { remotePort: entry.remotePort } : {}),
-      ...(entry.allowedToolsCount !== undefined ? { allowedToolsCount: entry.allowedToolsCount } : {}),
-    });
+    if (fields.action === "register") {
+      logAuditEntry({
+        timestamp: new Date().toISOString(),
+        tool: "",
+        args: {},
+        status: "allowed",
+        flags: [],
+        direction: "control-plane",
+        action: "register",
+        sessionId: fields.sessionId,
+        agentType: fields.agentType,
+        allowedToolsCount: fields.allowedToolsCount,
+        remoteAddress: fields.remoteAddress,
+        remotePort: fields.remotePort,
+      });
+    } else {
+      logAuditEntry({
+        timestamp: new Date().toISOString(),
+        tool: "",
+        args: {},
+        status: "allowed",
+        flags: [],
+        direction: "control-plane",
+        action: "deregister",
+        sessionId: fields.sessionId,
+        remoteAddress: fields.remoteAddress,
+        remotePort: fields.remotePort,
+      });
+    }
   } catch (err) {
     // Audit-log failures must never break the request path (#C5).
     log.warn({ err }, "control-plane audit write failed (ignored)");
   }
 }
 
-function validateRegisterPayload(body: unknown): { ok: true; value: RegisterPayload } | { ok: false; error: string } {
+function parseRegisterPayload(body: unknown): { ok: true; value: RegisterPayload } | { ok: false; error: string } {
   if (!body || typeof body !== "object" || Array.isArray(body)) {
     return { ok: false, error: "Body must be a JSON object" };
   }
   const obj = body as Record<string, unknown>;
-  const sessionId = obj.sessionId;
-  if (typeof sessionId !== "string" || sessionId.length === 0 || sessionId.length > SESSION_ID_MAX_LEN || !SESSION_ID_PATTERN.test(sessionId)) {
-    return { ok: false, error: `Invalid sessionId — must be 1..${SESSION_ID_MAX_LEN} chars matching [A-Za-z0-9._-]+` };
-  }
-  const agentType = obj.agentType;
-  if (typeof agentType !== "string" || agentType.length === 0 || agentType.length > AGENT_TYPE_MAX_LEN || !AGENT_TYPE_PATTERN.test(agentType)) {
-    return { ok: false, error: `Invalid agentType — must be 1..${AGENT_TYPE_MAX_LEN} chars matching [A-Za-z0-9._-]+` };
-  }
-  const allowedTools = obj.allowedTools;
-  if (!Array.isArray(allowedTools)) {
-    return { ok: false, error: "Invalid allowedTools — must be an array" };
-  }
-  if (allowedTools.length === 0) {
-    return { ok: false, error: "Invalid allowedTools — must be a non-empty array" };
-  }
-  if (allowedTools.length > ALLOWLIST_MAX_ENTRIES) {
-    return { ok: false, error: `Invalid allowedTools — too many entries (max ${ALLOWLIST_MAX_ENTRIES})` };
-  }
-  for (const t of allowedTools) {
-    if (typeof t !== "string" || t.length === 0 || t.length > ALLOWLIST_PATTERN_MAX_LEN) {
-      return { ok: false, error: "Invalid allowedTools — every entry must be a non-empty string within length bounds" };
-    }
-    if (!ALLOWLIST_PATTERN_CHARSET.test(t)) {
-      return {
-        ok: false,
-        error: "Invalid allowedTools — entries must match [A-Za-z0-9._*-]+ (no whitespace, control chars, null bytes, or unicode)",
-      };
-    }
-    // Reject bare catch-alls. Per-session allowlists exist to enforce
-    // least-privilege per agent; a bare "*" / "**" pattern grants unrestricted
-    // tool access and supersedes any narrower global ALLOWED_TOOLS list,
-    // which is the opposite of the control plane's purpose. Operators who
-    // want catch-all behaviour should rely on the global allowlist; the
-    // per-session surface accepts only specific names or prefix wildcards
-    // (e.g. "echo__*"). This is consistent with allowlist.ts:matchesPattern,
-    // which already rejects "**" without a non-empty prefix.
-    if (t === "*" || /^\*+$/.test(t)) {
-      return {
-        ok: false,
-        error: `Invalid allowedTools — bare catch-all "${t}" is not allowed in per-session allowlists. Use specific tool names or prefix wildcards (e.g. "echo__*").`,
-      };
-    }
-  }
-  return { ok: true, value: { sessionId, agentType, allowedTools: allowedTools as string[] } };
+  // Single source of truth for the contract (`validateSessionInput` in
+  // session-registry.ts) — same rules apply whether the registration arrives
+  // over HTTP or via a future in-process caller.
+  const validation = validateSessionInput({
+    sessionId: obj.sessionId,
+    agentType: obj.agentType,
+    allowedTools: obj.allowedTools,
+  });
+  if (!validation.ok) return validation;
+  return {
+    ok: true,
+    value: {
+      sessionId: obj.sessionId as string,
+      agentType: obj.agentType as string,
+      allowedTools: obj.allowedTools as string[],
+    },
+  };
 }
 
 function remoteIdentity(req: Request): { remoteAddress: string; remotePort: number } {
@@ -197,16 +202,16 @@ export function createControlPlaneServer(config: ControlPlaneServerConfig): Expr
   app.use(authMiddleware);
 
   app.post("/sessions", (req: Request, res: Response) => {
-    const validation = validateRegisterPayload(req.body);
-    if (!validation.ok) {
+    const parsed = parseRegisterPayload(req.body);
+    if (!parsed.ok) {
       log.warn(
-        { ...remoteIdentity(req), reason: "validation", detail: validation.error },
+        { ...remoteIdentity(req), reason: "validation", detail: parsed.error },
         "control-plane register rejected"
       );
-      res.status(400).json({ error: validation.error });
+      res.status(400).json({ error: parsed.error });
       return;
     }
-    const { sessionId, agentType, allowedTools } = validation.value;
+    const { sessionId, agentType, allowedTools } = parsed.value;
     try {
       config.registry.register({
         sessionId,
@@ -243,12 +248,24 @@ export function createControlPlaneServer(config: ControlPlaneServerConfig): Expr
       res.status(400).json({ error: "Invalid sessionId in path" });
       return;
     }
-    config.registry.deregister(sessionId);
-    emitControlPlaneAudit({
-      action: "deregister",
-      sessionId,
-      ...remoteIdentity(req),
-    });
+    const removed = config.registry.deregister(sessionId);
+    if (removed) {
+      // Audit only on actual state change. A no-op DELETE (session id not
+      // present) is a bug signal (operator thinks the session existed) but
+      // not a real state mutation — recording it would let a buggy CLI in
+      // a retry loop flood the audit NDJSON, mirroring the 401/400 probe-
+      // flood rationale. Warn-log so operators see the mismatch.
+      emitControlPlaneAudit({
+        action: "deregister",
+        sessionId,
+        ...remoteIdentity(req),
+      });
+    } else {
+      log.warn(
+        { ...remoteIdentity(req), sessionId, reason: "session_not_found" },
+        "control-plane deregister: session not found (no-op, idempotent 204)"
+      );
+    }
     res.status(204).end();
   });
 

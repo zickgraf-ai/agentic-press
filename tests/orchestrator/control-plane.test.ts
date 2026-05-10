@@ -226,12 +226,32 @@ describe("Control-plane HTTP server", () => {
     expect(registry.size()).toBe(0);
   });
 
-  it("DELETE /sessions/:id with valid token + unknown id → 204 (idempotent)", async () => {
+  it("DELETE /sessions/:id with valid token + unknown id → 204 (idempotent) and does NOT write audit entry (F6)", async () => {
+    auditEntries.length = 0;
     const res = await fetch(`${baseUrl}/sessions/never-was`, {
       method: "DELETE",
       headers: { Authorization: `Bearer ${TOKEN}` },
     });
     expect(res.status).toBe(204);
+    // F6: no-op DELETE is not a real state change. The probe-flood rationale
+    // applies — a buggy CLI in a retry loop must not flood the NDJSON file.
+    const cpEntries = (auditEntries as AuditEntry[]).filter(
+      (e) => e.direction === "control-plane"
+    );
+    expect(cpEntries).toHaveLength(0);
+  });
+
+  it("DELETE /sessions/:id with path param violating charset → 400 (F10)", async () => {
+    // Path param goes through Express's URL decoder before reaching our
+    // handler. A literal "bad value!" (after %-decoding) fails the
+    // SESSION_ID_PATTERN check and must be rejected with a 400.
+    const res = await fetch(`${baseUrl}/sessions/bad%20value%21`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/sessionId/i);
   });
 
   it("DELETE /sessions/:id without Authorization → 401", async () => {
@@ -372,6 +392,68 @@ describe("Control-plane HTTP server", () => {
     expect(allLogText).not.toContain(TOKEN);
     const allAuditText = JSON.stringify(auditEntries);
     expect(allAuditText).not.toContain(TOKEN);
+  });
+});
+
+describe("Control-plane audit-write failure resilience (F9)", () => {
+  let server: Server | undefined;
+  let baseUrl: string;
+  let registry: SessionRegistry;
+  let logAuditEntryMock: ReturnType<typeof vi.fn>;
+
+  beforeEach(async () => {
+    // Re-resolve the mocked logAuditEntry and switch it to throw for this
+    // suite. The audit emitter MUST catch the throw and continue serving so
+    // the control-plane response is unaffected.
+    const loggerModule = await import("../../src/mcp-proxy/logger.js");
+    logAuditEntryMock = loggerModule.logAuditEntry as unknown as ReturnType<typeof vi.fn>;
+    logAuditEntryMock.mockReset();
+    logAuditEntryMock.mockImplementation(() => {
+      throw new Error("simulated audit-log disk full");
+    });
+    mockLogger.warn.mockClear();
+    registry = createSessionRegistry();
+    const started = await startServer({ registry });
+    server = started.server;
+    baseUrl = started.baseUrl;
+  });
+
+  afterEach(async () => {
+    await closeServer(server);
+    server = undefined;
+    // Restore the default (push-into-array) implementation so the rest of
+    // the file's tests continue to work.
+    logAuditEntryMock.mockReset();
+    logAuditEntryMock.mockImplementation((entry: unknown) => {
+      auditEntries.push(entry);
+    });
+  });
+
+  it("POST /sessions succeeds (201) and warn-logs when logAuditEntry throws", async () => {
+    const res = await fetch(`${baseUrl}/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ sessionId: "audit-fail", agentType: "reviewer", allowedTools: ["Read"] }),
+    });
+    expect(res.status).toBe(201);
+    // Registry mutation still happened — the response is honest.
+    expect(registry.size()).toBe(1);
+    // Warn-log captured the audit failure.
+    const warns = mockLogger.warn.mock.calls.map((c) => JSON.stringify(c));
+    expect(warns.some((w) => /audit write failed/i.test(w))).toBe(true);
+  });
+
+  it("DELETE /sessions/:id succeeds (204) and warn-logs when logAuditEntry throws", async () => {
+    registry.register({ sessionId: "audit-fail-2", agentType: "reviewer", allowlist: { patterns: ["Read"] } });
+    mockLogger.warn.mockClear();
+    const res = await fetch(`${baseUrl}/sessions/audit-fail-2`, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${TOKEN}` },
+    });
+    expect(res.status).toBe(204);
+    expect(registry.size()).toBe(0);
+    const warns = mockLogger.warn.mock.calls.map((c) => JSON.stringify(c));
+    expect(warns.some((w) => /audit write failed/i.test(w))).toBe(true);
   });
 });
 

@@ -202,15 +202,22 @@ describe("Tier 1.3 — proxy uses per-session allowlist when registered", () => 
     expect(recorder.recordBlockedRequest).toHaveBeenCalledWith("allowlist");
   });
 
-  it("malformed sessionId header (Tier 1.1 strips it) → falls through to global, NOT to a coincidentally-registered entry", async () => {
-    // Strongest version of this guard: register an entry under the EXACT
-    // string the malformed header carries. A buggy proxy that keyed registry
-    // lookups off the raw req.header() value (instead of the Tier 1.1-parsed
-    // sessionId) would match this entry and allow Write. The correct
-    // behaviour: identity-header parser rejects the header (charset violation),
-    // sessionId becomes undefined, registry is NOT consulted, request falls
-    // through to global allowlist — Write is blocked.
-    registry.register({ sessionId: "bad value!", agentType: "reviewer", allowlist: { patterns: ["Write"] } });
+  it("registry refuses to hold a sessionId that the identity-header parser would reject — guard is by construction", () => {
+    // F5 follow-on: now that the registry's validate() shares the contract
+    // with the HTTP layer, a malformed sessionId can never enter the registry
+    // in the first place. The guard against "malformed header accidentally
+    // matches a registered entry" becomes a by-construction property, not a
+    // runtime one. This test locks in the by-construction part.
+    expect(() =>
+      registry.register({ sessionId: "bad value!", agentType: "reviewer", allowlist: { patterns: ["Write"] } })
+    ).toThrow(/sessionId/i);
+  });
+
+  it("malformed sessionId header → Tier 1.1 strips it → falls through to global allowlist (parser is the guard)", async () => {
+    // Even with no entry under "bad value!" (registry refused to register
+    // one), confirm the proxy correctly handles malformed headers by
+    // dropping the parsed sessionId to undefined and falling through to
+    // the global allowlist. Global allows Read, blocks Write.
     const writeRes = await mcpCall(url, 1, "Write", {}, { "X-Agent-Session-Id": "bad value!" });
     const writeJson = (await writeRes.json()) as { error?: { code: number } };
     expect(writeJson.error?.code).toBe(-32600);

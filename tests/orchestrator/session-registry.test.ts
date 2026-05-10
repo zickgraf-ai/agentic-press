@@ -51,9 +51,12 @@ describe("SessionRegistry", () => {
     expect(registry.lookup("s2")).toBeUndefined();
   });
 
-  it("deregister of unknown sessionId is a no-op (does not throw)", () => {
+  it("deregister returns true when something was removed, false when nothing was there", () => {
     const registry = createSessionRegistry();
-    expect(() => registry.deregister("never-was")).not.toThrow();
+    registry.register({ sessionId: "present", agentType: "r", allowlist: SAMPLE });
+    expect(registry.deregister("present")).toBe(true);
+    expect(registry.deregister("present")).toBe(false);
+    expect(registry.deregister("never-was")).toBe(false);
     expect(registry.size()).toBe(0);
   });
 
