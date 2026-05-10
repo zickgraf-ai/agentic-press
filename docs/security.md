@@ -135,6 +135,13 @@ Tier 1.3 (#56) introduces a **second HTTP listener** alongside the proxy: the co
 | Configurable bind via env var | Operator footgun that could silently void the primary defence. Hard-coded literal in source. |
 | Auto-generation of bearer token with stdout print | "Secret printed to logs" is a bad pattern even when intentional, and fragile if operator doesn't capture stdout. Explicit-only. |
 
+**Per-session allowlist semantics:**
+
+A registered per-session allowlist *replaces* the global `ALLOWED_TOOLS` list for that session — it does not intersect with it. This is by design (the dispatch CLI is operator-controlled and trusted to enforce least-privilege per agent), but it means a permissive per-session policy could supersede a narrower global one. Two guardrails:
+
+- The control-plane validation layer **rejects bare catch-all patterns** (`*`, `**`) in `allowedTools`. A bare `*` has no least-privilege use case at the per-session layer; operators who want catch-all behaviour should rely on the global allowlist. Prefix wildcards like `echo__*` are accepted because they legitimately narrow.
+- A future PR adding intersect-with-global semantics (per-session can only narrow, never widen) would tighten this further. Tracked as a follow-up.
+
 **Audit invariants for the control plane:**
 
 - Successful `POST /sessions` and `DELETE /sessions/:id` write a single `direction: "control-plane"` audit entry per call. Structured fields capture `action` (`register`/`deregister`), `sessionId`, `agentType`, `remoteAddress`, `remotePort`, and (for register only) `allowedToolsCount`.

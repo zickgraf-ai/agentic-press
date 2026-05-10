@@ -187,6 +187,18 @@ try {
 // reach host.docker.internal but not the host's loopback iface). Changing it
 // requires a code change + security review.
 const controlToken = process.env.MCP_CONTROL_TOKEN?.trim();
+// Minimum token length. The plan specifies 32 random bytes hex-encoded
+// (64 chars), but we accept anything >= 32 chars to avoid being prescriptive
+// about encoding. Below 32 chars is brute-forceable; fail loudly at startup
+// rather than letting an operator silently weaken the defense-in-depth layer.
+// The loopback bind is the primary defense; this is the second layer.
+const MIN_CONTROL_TOKEN_LEN = 32;
+if (controlToken !== undefined && controlToken.length < MIN_CONTROL_TOKEN_LEN) {
+  throw new Error(
+    `MCP_CONTROL_TOKEN is too short (${controlToken.length} chars, min ${MIN_CONTROL_TOKEN_LEN}). ` +
+      `Generate a strong token with: openssl rand -hex 32`
+  );
+}
 const controlPort = parseInt(process.env.MCP_CONTROL_PORT ?? "18924", 10);
 if (isNaN(controlPort) || controlPort < 1 || controlPort > 65535) {
   throw new Error(

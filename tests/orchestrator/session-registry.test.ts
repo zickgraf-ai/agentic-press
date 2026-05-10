@@ -16,7 +16,7 @@ vi.mock("../../src/logger.js", () => ({
   childLogger: vi.fn(() => mockLogger),
 }));
 
-import { createSessionRegistry } from "../../src/orchestrator/session-registry.js";
+import { createSessionRegistry, MAX_SESSIONS } from "../../src/orchestrator/session-registry.js";
 import type { AllowlistConfig } from "../../src/mcp-proxy/allowlist.js";
 
 const SAMPLE: AllowlistConfig = { patterns: ["echo__read_file"] };
@@ -116,5 +116,43 @@ describe("SessionRegistry", () => {
     expect(registry.size()).toBe(2);
     registry.deregister("x");
     expect(registry.size()).toBe(1);
+  });
+
+  it("register throws when registry is full (defense-in-depth against unbounded growth)", () => {
+    const registry = createSessionRegistry();
+    for (let i = 0; i < MAX_SESSIONS; i++) {
+      registry.register({ sessionId: `s${i}`, agentType: "r", allowlist: SAMPLE });
+    }
+    expect(registry.size()).toBe(MAX_SESSIONS);
+    expect(() =>
+      registry.register({ sessionId: "overflow", agentType: "r", allowlist: SAMPLE })
+    ).toThrow(/full|max/i);
+    expect(registry.size()).toBe(MAX_SESSIONS);
+    // Re-registering an existing sessionId must NOT trip the cap (it's a
+    // slot-overwriting operation, not a fresh allocation).
+    expect(() =>
+      registry.register({ sessionId: "s0", agentType: "c", allowlist: SAMPLE })
+    ).not.toThrow();
+    expect(registry.size()).toBe(MAX_SESSIONS);
+  });
+
+  it("lookup() returns a defensive copy — mutating the returned entry's patterns does not affect internal state", () => {
+    const registry = createSessionRegistry();
+    registry.register({ sessionId: "iso", agentType: "r", allowlist: { patterns: ["Read"] } });
+    const first = registry.lookup("iso");
+    expect(first).toBeDefined();
+    // Cast away readonly to simulate a future caller that ignores the
+    // compile-time annotation. The defensive copy must protect us.
+    (first!.allowlist.patterns as string[]).push("Write");
+    const second = registry.lookup("iso");
+    expect(second?.allowlist.patterns).toEqual(["Read"]);
+  });
+
+  it("list() returns defensive copies — mutating an entry returned by list() does not affect internal state", () => {
+    const registry = createSessionRegistry();
+    registry.register({ sessionId: "iso2", agentType: "r", allowlist: { patterns: ["Read"] } });
+    const listed = registry.list();
+    (listed[0]!.allowlist.patterns as string[]).push("Write");
+    expect(registry.lookup("iso2")?.allowlist.patterns).toEqual(["Read"]);
   });
 });

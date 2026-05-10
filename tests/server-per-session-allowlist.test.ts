@@ -219,3 +219,44 @@ describe("Tier 1.3 — proxy uses per-session allowlist when registered", () => 
     expect(readJson.result).toBeDefined();
   });
 });
+
+describe("Tier 1.3 — registry.lookup() throwing falls through to global (anchor #C5)", () => {
+  let server: Server;
+  let url: string;
+
+  beforeEach(async () => {
+    auditEntries.length = 0;
+    // Inject a registry whose lookup() throws. The proxy MUST NOT propagate
+    // this — observability/orchestration failures never break the request
+    // path (anchor #C5). Falls through to global allowlist with a warn-log.
+    const throwingRegistry = {
+      lookup: () => {
+        throw new Error("boom (simulated registry failure)");
+      },
+    };
+    const started = await startServer(makeConfig({
+      bridge: makeBridge(),
+      serverRoutes: { Read: "fs", Write: "fs", Grep: "fs" },
+      registry: throwingRegistry,
+    }));
+    server = started.server;
+    url = started.url;
+  });
+
+  afterEach(async () => {
+    await closeServer(server);
+  });
+
+  it("request with sessionId set + registry.lookup() throws → uses global allowlist, request still processes", async () => {
+    // Global allowlist is ["Read", "Grep"]. Read should be allowed even
+    // though every registry lookup throws.
+    const readRes = await mcpCall(url, 1, "Read", {}, { "X-Agent-Session-Id": "anything" });
+    const readJson = (await readRes.json()) as { result?: unknown; error?: unknown };
+    expect(readJson.result).toBeDefined();
+    expect(readJson.error).toBeUndefined();
+
+    const writeRes = await mcpCall(url, 2, "Write", {}, { "X-Agent-Session-Id": "anything" });
+    const writeJson = (await writeRes.json()) as { error?: { code: number } };
+    expect(writeJson.error?.code).toBe(-32600);
+  });
+});

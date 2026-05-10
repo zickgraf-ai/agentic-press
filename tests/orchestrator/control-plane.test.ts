@@ -138,6 +138,16 @@ describe("Control-plane HTTP server", () => {
     expect(registry.size()).toBe(0);
   });
 
+  it("POST /sessions accepts prefix wildcards (e.g. echo__*) — only bare catch-alls are rejected", async () => {
+    const res = await fetch(`${baseUrl}/sessions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${TOKEN}` },
+      body: JSON.stringify({ sessionId: "wild", agentType: "reviewer", allowedTools: ["echo__*", "Read"] }),
+    });
+    expect(res.status).toBe(201);
+    expect(registry.size()).toBe(1);
+  });
+
   it("POST /sessions with valid token + valid body → 201, registry has entry", async () => {
     const res = await fetch(`${baseUrl}/sessions`, {
       method: "POST",
@@ -163,6 +173,9 @@ describe("Control-plane HTTP server", () => {
       { sessionId: "a".repeat(200), agentType: "reviewer", allowedTools: ["Read"] }, // length violation
       { sessionId: "ok", agentType: "x".repeat(50), allowedTools: ["Read"] }, // agentType too long
       { sessionId: "ok", agentType: "reviewer", allowedTools: [] }, // empty allowedTools
+      { sessionId: "ok", agentType: "reviewer", allowedTools: ["*"] }, // bare catch-all rejected (F12)
+      { sessionId: "ok", agentType: "reviewer", allowedTools: ["**"] }, // multi-asterisk catch-all rejected
+      { sessionId: "ok", agentType: "reviewer", allowedTools: ["Read", "*"] }, // mixed list — bare * still rejected
     ];
     for (const body of cases) {
       const res = await fetch(`${baseUrl}/sessions`, {

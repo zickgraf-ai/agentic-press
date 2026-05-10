@@ -114,6 +114,20 @@ function validateRegisterPayload(body: unknown): { ok: true; value: RegisterPayl
     if (typeof t !== "string" || t.length === 0 || t.length > ALLOWLIST_PATTERN_MAX_LEN) {
       return { ok: false, error: "Invalid allowedTools — every entry must be a non-empty string within length bounds" };
     }
+    // Reject bare catch-alls. Per-session allowlists exist to enforce
+    // least-privilege per agent; a bare "*" / "**" pattern grants unrestricted
+    // tool access and supersedes any narrower global ALLOWED_TOOLS list,
+    // which is the opposite of the control plane's purpose. Operators who
+    // want catch-all behaviour should rely on the global allowlist; the
+    // per-session surface accepts only specific names or prefix wildcards
+    // (e.g. "echo__*"). This is consistent with allowlist.ts:matchesPattern,
+    // which already rejects "**" without a non-empty prefix.
+    if (t === "*" || /^\*+$/.test(t)) {
+      return {
+        ok: false,
+        error: `Invalid allowedTools — bare catch-all "${t}" is not allowed in per-session allowlists. Use specific tool names or prefix wildcards (e.g. "echo__*").`,
+      };
+    }
   }
   return { ok: true, value: { sessionId, agentType, allowedTools: allowedTools as string[] } };
 }
