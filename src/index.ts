@@ -27,6 +27,8 @@ import {
   validateServerConfig,
   parseMaxResponseBytes,
 } from "./server-config.js";
+import { createSessionRegistry, type SessionRegistry } from "./orchestrator/session-registry.js";
+import { createControlPlaneServer } from "./orchestrator/control-plane.js";
 
 const log = childLogger("main");
 
@@ -171,6 +173,43 @@ try {
   eventBridge = createNoopEventBridge();
 }
 
+// Tier 1.3 (#56) — per-session allowlist registry + control-plane HTTP server.
+//
+// MCP_CONTROL_TOKEN is the bearer token that gates the control plane. Treat it
+// as a secret on par with API keys — NEVER log, never echo, never pass into a
+// sandbox via `sbx exec --env`. Operator sets it explicitly in .envrc; an
+// unset token disables the control plane entirely (the proxy continues with
+// the global allowlist exactly as Phase 1 did).
+//
+// MCP_CONTROL_PORT is the listen port; defaults to 18924. The bind address is
+// the literal "127.0.0.1" — there is intentionally NO env knob for the bind.
+// Widening the bind would void the loopback-isolation defence (sandboxes can
+// reach host.docker.internal but not the host's loopback iface). Changing it
+// requires a code change + security review.
+const controlToken = process.env.MCP_CONTROL_TOKEN?.trim();
+// Minimum token length. The plan specifies 32 random bytes hex-encoded
+// (64 chars), but we accept anything >= 32 chars to avoid being prescriptive
+// about encoding. Below 32 chars is brute-forceable; fail loudly at startup
+// rather than letting an operator silently weaken the defense-in-depth layer.
+// The loopback bind is the primary defense; this is the second layer.
+const MIN_CONTROL_TOKEN_LEN = 32;
+if (controlToken !== undefined && controlToken.length < MIN_CONTROL_TOKEN_LEN) {
+  throw new Error(
+    `MCP_CONTROL_TOKEN is too short (${controlToken.length} chars, min ${MIN_CONTROL_TOKEN_LEN}). ` +
+      `Generate a strong token with: openssl rand -hex 32`
+  );
+}
+const controlPort = parseInt(process.env.MCP_CONTROL_PORT ?? "18924", 10);
+if (isNaN(controlPort) || controlPort < 1 || controlPort > 65535) {
+  throw new Error(
+    `Invalid MCP_CONTROL_PORT: "${process.env.MCP_CONTROL_PORT}" — must be 1-65535`
+  );
+}
+const sessionRegistry: SessionRegistry | undefined = controlToken
+  ? createSessionRegistry()
+  : undefined;
+let controlPlaneServer: import("node:http").Server | undefined;
+
 const config: ProxyServerConfig = {
   port,
   allowedTools: (process.env.ALLOWED_TOOLS ?? "").split(",").filter(Boolean),
@@ -180,6 +219,7 @@ const config: ProxyServerConfig = {
   tracer,
   eventBridge,
   recorder,
+  registry: sessionRegistry,
 };
 
 const app = createProxyServer(config);
@@ -194,6 +234,40 @@ const server = app.listen(config.port, "0.0.0.0", () => {
     );
   }
 });
+
+// Start the control-plane server only when a token is configured AND the
+// registry was created above. The bind address is hard-coded to "127.0.0.1"
+// — see comment above — so sandbox-side processes can't reach it via
+// host.docker.internal.
+if (sessionRegistry && controlToken) {
+  const controlPlaneApp = createControlPlaneServer({
+    registry: sessionRegistry,
+    token: controlToken,
+  });
+  controlPlaneServer = controlPlaneApp.listen(controlPort, "127.0.0.1", () => {
+    log.info(
+      { port: controlPort, bind: "127.0.0.1" },
+      "Control-plane endpoint listening (per-session allowlists enabled)"
+    );
+  });
+  // Async error events (EADDRINUSE, EACCES) escape the surrounding scope.
+  // Without this handler the whole process crashes — and a control-plane
+  // failure must NEVER take the proxy down (#C5: observability/orchestration
+  // failures never break the request path). Disable the control plane and
+  // continue serving with the global allowlist.
+  controlPlaneServer.on("error", (err) => {
+    log.warn(
+      { err, port: controlPort },
+      "Control-plane HTTP server failed to bind — control plane disabled, proxy continues"
+    );
+    controlPlaneServer = undefined;
+  });
+} else {
+  log.warn(
+    "MCP_CONTROL_TOKEN unset — control plane disabled, per-session allowlists unavailable. " +
+      "Set MCP_CONTROL_TOKEN to enable. See docs/security.md (control-plane trust boundary)."
+  );
+}
 
 // Graceful shutdown: close HTTP server first, then bridge + tracer, with 5s force-exit
 function shutdown(signal: string) {
@@ -227,6 +301,11 @@ function shutdown(signal: string) {
     if (metricsHttpServer) {
       tasks.push(
         new Promise<void>((resolve) => metricsHttpServer!.close(() => resolve()))
+      );
+    }
+    if (controlPlaneServer) {
+      tasks.push(
+        new Promise<void>((resolve) => controlPlaneServer!.close(() => resolve()))
       );
     }
     Promise.allSettled(tasks).then((results) => {

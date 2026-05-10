@@ -18,6 +18,7 @@ import {
 } from "../observability/langfuse.js";
 import { createNoopEventBridge, type EventBridge } from "../dashboard/event-bridge.js";
 import { createNoopRecorder, type MetricsRecorder, type BlockReason } from "../observability/metrics.js";
+import type { SessionRegistry } from "../orchestrator/session-registry.js";
 
 const log = childLogger("mcp-proxy");
 
@@ -94,6 +95,16 @@ export interface ProxyServerConfig {
   readonly tracer?: Tracer;
   readonly eventBridge?: EventBridge;
   readonly recorder?: MetricsRecorder;
+  /**
+   * Tier 1.3 (#56) — optional per-session allowlist registry. When set, the
+   * proxy consults the registry on each /mcp request: if the request carries
+   * a parsed sessionId AND the registry has an entry for it, the per-session
+   * allowlist is used. Otherwise the request falls through to the global
+   * `allowedTools` config. Type is `Pick<SessionRegistry, "lookup">` so this
+   * code path can NEVER mutate the registry — only the control-plane server
+   * holds the writer.
+   */
+  readonly registry?: Pick<SessionRegistry, "lookup">;
 }
 
 interface JsonRpcRequest {
@@ -196,7 +207,7 @@ export function createProxyServer(config: ProxyServerConfig): Express {
 
   const allowlistConfig: AllowlistConfig = { patterns: [...config.allowedTools] };
   const workspaceRoot = config.workspaceRoot ?? process.env.WORKSPACE_ROOT ?? process.cwd();
-  const { bridge } = config;
+  const { bridge, registry } = config;
   const sortedRoutes = config.serverRoutes ? sortRoutes(config.serverRoutes) : undefined;
   const tracer: Tracer = config.tracer ?? createNoopTracer();
   const eventBridge: EventBridge = config.eventBridge ?? createNoopEventBridge();
@@ -394,8 +405,26 @@ export function createProxyServer(config: ProxyServerConfig): Express {
         activeTrace = undefined;
       }
 
-      // 1. Allowlist check
-      const allowResult = checkAllowlist(tool, allowlistConfig);
+      // 1. Allowlist check.
+      //
+      // Tier 1.3 (#56): consult the per-session registry when the request
+      // carries a parsed sessionId. The lookup is wrapped in try/catch so a
+      // misbehaving registry impl can NEVER reject the request — observability
+      // / orchestration failures fall through to the global allowlist with a
+      // warn-log (anchor #C5). A malformed sessionId from Tier 1.1 already
+      // arrives here as `undefined`, which short-circuits the lookup entirely.
+      let effectiveAllowlist: AllowlistConfig = allowlistConfig;
+      if (sessionId !== undefined && registry) {
+        try {
+          const entry = registry.lookup(sessionId);
+          if (entry) {
+            effectiveAllowlist = entry.allowlist;
+          }
+        } catch (err) {
+          reqLog.warn({ err, sessionId }, "session registry lookup threw — falling back to global allowlist");
+        }
+      }
+      const allowResult = checkAllowlist(tool, effectiveAllowlist);
       if (!allowResult.allowed) {
         audit(tool, toolArgs, "blocked", [], undefined, "request", "allowlist");
         safeSpan({ tool, status: "blocked", durationMs: Date.now() - start });
