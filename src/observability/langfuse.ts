@@ -118,7 +118,7 @@ export function getNoopActiveTrace(): ActiveTrace {
  * Runtime adapter type for the v5 `LangfuseSpan`. Consolidates the assumptions
  * about the SDK's runtime shape into a single place so an upstream change
  * surfaces as one type compile error rather than 15 silent runtime failures
- * scattered across the wrapper. Reviewer suggestion S1.
+ * scattered across the wrapper.
  */
 interface LangfuseSpanRuntime {
   readonly otelSpan?: { setAttribute(key: string, value: unknown): void };
@@ -195,13 +195,8 @@ export async function createTracer(config: LangfuseConfig): Promise<Tracer> {
     };
   }).LangfuseOtelSpanAttributes;
 
-  // Startup probe — confirm the credentials actually authenticate against the
-  // configured host before we tell the operator "tracing enabled." The SDK
-  // accepts mismatched key/host (e.g. US-region keys with the default EU host)
-  // and silently 401s on every upload, with no observability that traces are
-  // disappearing. The probe surfaces this as a loud startup warn. We do NOT
-  // fall back to no-op on failure — the operator may fix env without
-  // restarting, and the tracer should resume working when it succeeds.
+  // Probe is informational; never disables tracing on failure (operator can
+  // fix env and the tracer resumes without a restart).
   const probe = await probeLangfuseAuth({
     host: config.host,
     publicKey: config.publicKey,
@@ -213,11 +208,16 @@ export async function createTracer(config: LangfuseConfig): Promise<Tracer> {
       "Langfuse credentials verified at startup"
     );
   } else if (probe.reason === "auth") {
-    log.warn(
+    log.error(
       { host: config.host, status: probe.status },
       "Langfuse credentials rejected (HTTP " +
         probe.status +
         ") — likely region mismatch. Check that LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY match the region of LANGFUSE_HOST. Traces will not upload until corrected."
+    );
+  } else if (probe.reason === "unexpected-shape") {
+    log.error(
+      { host: config.host, status: probe.status },
+      "Langfuse host responded 2xx but the body wasn't a recognized projects payload — LANGFUSE_HOST may point at a captive portal or the wrong service. Traces will not upload until corrected."
     );
   } else {
     log.warn(
@@ -245,7 +245,7 @@ export async function createTracer(config: LangfuseConfig): Promise<Tracer> {
   // creates spans on our LangfuseSpanProcessor's pipeline.
   //
   // We considered using the public `trace.getTracerProvider()` from
-  // `@opentelemetry/api` (reviewer C2), but that returns a `ProxyTracerProvider`
+  // `@opentelemetry/api`, but that returns a `ProxyTracerProvider`
   // wrapper rather than the underlying `NodeTracerProvider` that the span
   // processor was attached to. Passing the proxy to setLangfuseTracerProvider
   // produces a hollow tracer and traces silently fail to reach Langfuse —
@@ -422,8 +422,8 @@ function safeSerialize(value: unknown): string {
   try {
     return JSON.stringify(value);
   } catch (err) {
-    // Reviewer S2: log at debug level so operators have breadcrumbs but the
-    // request path stays quiet for the common case.
+    // Debug-level so operators have breadcrumbs without the request path
+    // logging on every miss.
     log.debug({ err }, "safeSerialize: JSON.stringify failed");
     return "[unserializable]";
   }

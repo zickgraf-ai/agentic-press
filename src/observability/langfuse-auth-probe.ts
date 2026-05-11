@@ -1,17 +1,9 @@
-/**
- * Startup probe that confirms Langfuse credentials authenticate against the
- * configured host before the proxy declares "tracing enabled."
- *
- * Defends against a class of silent failure where the SDK accepts a public/
- * secret/host triple that doesn't match (typically a US-region key set with
- * a default EU host), uploads silently 401, and traces never appear in the
- * UI. The probe surfaces this as a loud warn at startup; the SDK is still
- * constructed so the operator can fix env and traces start working without
- * a restart (consistent with the "observability never breaks startup"
- * invariant).
- */
+// Startup probe — informational only; never disables tracing on failure.
 
 const DEFAULT_TIMEOUT_MS = 3_000;
+// Cap body reads at startup so a hostile endpoint cannot OOM the proxy
+// before tracing even comes online.
+const MAX_BODY_BYTES = 64 * 1024;
 
 export interface ProbeLangfuseAuthOptions {
   readonly host: string;
@@ -22,37 +14,75 @@ export interface ProbeLangfuseAuthOptions {
 
 export type ProbeResult =
   | { readonly ok: true; readonly projectId?: string }
-  | { readonly ok: false; readonly reason: "auth"; readonly status: number }
+  | { readonly ok: false; readonly reason: "auth"; readonly status: 401 | 403 }
   | { readonly ok: false; readonly reason: "server"; readonly status: number }
+  | { readonly ok: false; readonly reason: "unexpected-shape"; readonly status: number }
   | { readonly ok: false; readonly reason: "network" }
   | { readonly ok: false; readonly reason: "timeout" };
 
 function isAbortError(err: unknown): boolean {
+  if (err instanceof DOMException && err.name === "AbortError") return true;
   return err instanceof Error && (err.name === "AbortError" || (err as { code?: unknown }).code === "ABORT_ERR");
 }
 
-function extractProjectId(text: string): string | undefined {
-  if (!text) return undefined;
+async function readBoundedText(res: Response): Promise<string> {
+  // Stream-aware cap so a 10 GB body doesn't allocate 10 GB before we check.
+  // Falls back to res.text() if the body is unavailable (test stubs, mocks).
+  if (!res.body) {
+    try {
+      const text = await res.text();
+      return text.length > MAX_BODY_BYTES ? text.slice(0, MAX_BODY_BYTES) : text;
+    } catch {
+      return "";
+    }
+  }
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
   try {
-    const parsed = JSON.parse(text) as unknown;
-    // Langfuse's /api/public/projects returns { data: [{ id, name }, ...] }.
-    if (
-      typeof parsed === "object" &&
-      parsed !== null &&
-      "data" in parsed &&
-      Array.isArray((parsed as { data: unknown }).data)
-    ) {
-      const first = (parsed as { data: unknown[] }).data[0];
-      if (first && typeof first === "object" && "id" in first) {
-        const id = (first as { id: unknown }).id;
-        if (typeof id === "string" && id.length > 0) return id;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) {
+        chunks.push(value);
+        total += value.byteLength;
+        if (total >= MAX_BODY_BYTES) {
+          try {
+            await reader.cancel();
+          } catch {
+            // ignore — we already have enough
+          }
+          break;
+        }
       }
     }
   } catch {
-    // Body wasn't JSON — fall through. A 200 with non-JSON body is unusual
-    // but not failure; we still consider the credentials verified.
+    return "";
   }
-  return undefined;
+  return new TextDecoder().decode(Buffer.concat(chunks.map((c) => Buffer.from(c)) as unknown as Uint8Array[]).slice(0, MAX_BODY_BYTES));
+}
+
+interface LangfuseProjectsBody {
+  readonly data: readonly { readonly id: string }[];
+}
+
+function parseProjectsBody(text: string): LangfuseProjectsBody | null {
+  if (!text) return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return null;
+  }
+  if (typeof parsed !== "object" || parsed === null || !("data" in parsed)) return null;
+  const data = (parsed as { data: unknown }).data;
+  if (!Array.isArray(data)) return null;
+  return { data: data as LangfuseProjectsBody["data"] };
+}
+
+function isJsonContentType(res: Response): boolean {
+  const ct = res.headers.get("content-type") ?? "";
+  return /\bapplication\/json\b/i.test(ct);
 }
 
 export async function probeLangfuseAuth(opts: ProbeLangfuseAuthOptions): Promise<ProbeResult> {
@@ -69,6 +99,8 @@ export async function probeLangfuseAuth(opts: ProbeLangfuseAuthOptions): Promise
       method: "GET",
       headers: { Authorization: authHeader, Accept: "application/json" },
       signal: controller.signal,
+      // Refuse redirects so the Basic-auth header cannot leak to a third-party host.
+      redirect: "error",
     });
   } catch (err) {
     if (isAbortError(err)) return { ok: false, reason: "timeout" };
@@ -77,33 +109,35 @@ export async function probeLangfuseAuth(opts: ProbeLangfuseAuthOptions): Promise
     clearTimeout(timer);
   }
 
+  // Drain the body for any branch we don't otherwise consume. Bounded so a
+  // hostile server cannot stall startup or balloon memory.
   if (res.status === 401 || res.status === 403) {
-    // Drain the body to free the socket; do NOT include in the result —
-    // a hostile/buggy server could echo the secret key back in its 401 body.
-    try {
-      await res.text();
-    } catch {
-      // best-effort drain
-    }
-    return { ok: false, reason: "auth", status: res.status };
+    await readBoundedText(res);
+    return { ok: false, reason: "auth", status: res.status as 401 | 403 };
   }
 
   if (res.status >= 200 && res.status < 300) {
-    let body = "";
-    try {
-      body = await res.text();
-    } catch {
-      // unable to read body — still consider 2xx a successful auth probe
+    // Lenient success was the original bug. Require the response to actually
+    // look like a Langfuse /api/public/projects payload — JSON content-type
+    // AND a parseable { data: [...] } envelope — before declaring credentials
+    // verified. A captive portal or wrong-service host returning 200/HTML
+    // surfaces as `unexpected-shape`, not as a false positive.
+    if (!isJsonContentType(res)) {
+      await readBoundedText(res);
+      return { ok: false, reason: "unexpected-shape", status: res.status };
     }
-    const projectId = extractProjectId(body);
-    return projectId !== undefined ? { ok: true, projectId } : { ok: true };
+    const text = await readBoundedText(res);
+    const body = parseProjectsBody(text);
+    if (body === null) return { ok: false, reason: "unexpected-shape", status: res.status };
+    const first = body.data[0];
+    if (first && typeof first.id === "string" && first.id.length > 0) {
+      // Cap projectId length defensively; never echo a megabyte from the wire.
+      const id = first.id.length > 128 ? first.id.slice(0, 128) : first.id;
+      return { ok: true, projectId: id };
+    }
+    return { ok: true };
   }
 
-  // Drain
-  try {
-    await res.text();
-  } catch {
-    // best-effort
-  }
+  await readBoundedText(res);
   return { ok: false, reason: "server", status: res.status };
 }
