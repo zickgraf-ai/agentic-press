@@ -1,6 +1,7 @@
 import type { AuditStatus } from "../types.js";
 import type { LangfuseConfig } from "./config.js";
 import { childLogger } from "../logger.js";
+import { probeLangfuseAuth } from "./langfuse-auth-probe.js";
 
 const log = childLogger("langfuse");
 
@@ -117,7 +118,7 @@ export function getNoopActiveTrace(): ActiveTrace {
  * Runtime adapter type for the v5 `LangfuseSpan`. Consolidates the assumptions
  * about the SDK's runtime shape into a single place so an upstream change
  * surfaces as one type compile error rather than 15 silent runtime failures
- * scattered across the wrapper. Reviewer suggestion S1.
+ * scattered across the wrapper.
  */
 interface LangfuseSpanRuntime {
   readonly otelSpan?: { setAttribute(key: string, value: unknown): void };
@@ -194,6 +195,39 @@ export async function createTracer(config: LangfuseConfig): Promise<Tracer> {
     };
   }).LangfuseOtelSpanAttributes;
 
+  // Probe is informational; never disables tracing on failure (operator can
+  // fix env and the tracer resumes without a restart).
+  const probe = await probeLangfuseAuth({
+    host: config.host,
+    publicKey: config.publicKey,
+    secretKey: config.secretKey,
+  });
+  if (probe.ok) {
+    log.info(
+      { host: config.host, ...(probe.projectId ? { projectId: probe.projectId } : {}) },
+      "Langfuse credentials verified at startup"
+    );
+  } else if (probe.reason === "auth") {
+    log.error(
+      { host: config.host, status: probe.status },
+      "Langfuse credentials rejected (HTTP " +
+        probe.status +
+        ") — likely region mismatch. Check that LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY match the region of LANGFUSE_HOST. Traces will not upload until corrected."
+    );
+  } else if (probe.reason === "unexpected-shape") {
+    log.error(
+      { host: config.host, status: probe.status },
+      "Langfuse host responded 2xx but the body wasn't a recognized projects payload — LANGFUSE_HOST may point at a captive portal or the wrong service. Traces will not upload until corrected."
+    );
+  } else {
+    log.warn(
+      { host: config.host, reason: probe.reason },
+      "Langfuse credential probe could not complete (" +
+        probe.reason +
+        ") — proceeding with tracer setup; the probe failure may be transient."
+    );
+  }
+
   // OTEL NodeSDK setup. The LangfuseSpanProcessor batches observations and
   // uploads them to Langfuse on flush/shutdown. Failure here means we cannot
   // trace; we throw so the outer try/catch in src/index.ts falls back to the
@@ -211,7 +245,7 @@ export async function createTracer(config: LangfuseConfig): Promise<Tracer> {
   // creates spans on our LangfuseSpanProcessor's pipeline.
   //
   // We considered using the public `trace.getTracerProvider()` from
-  // `@opentelemetry/api` (reviewer C2), but that returns a `ProxyTracerProvider`
+  // `@opentelemetry/api`, but that returns a `ProxyTracerProvider`
   // wrapper rather than the underlying `NodeTracerProvider` that the span
   // processor was attached to. Passing the proxy to setLangfuseTracerProvider
   // produces a hollow tracer and traces silently fail to reach Langfuse —
@@ -388,8 +422,8 @@ function safeSerialize(value: unknown): string {
   try {
     return JSON.stringify(value);
   } catch (err) {
-    // Reviewer S2: log at debug level so operators have breadcrumbs but the
-    // request path stays quiet for the common case.
+    // Debug-level so operators have breadcrumbs without the request path
+    // logging on every miss.
     log.debug({ err }, "safeSerialize: JSON.stringify failed");
     return "[unserializable]";
   }

@@ -95,6 +95,16 @@ const coreFactory = vi.fn(() => ({
 }));
 vi.mock("@langfuse/core", () => coreFactory());
 
+// Mock the auth probe so this suite cannot make outbound HTTPS calls. Tests
+// that care about probe behavior set the resolved value via probeMock; the
+// default is a successful probe so existing enabled-mode tests pass.
+const probeMock = vi.hoisted(() =>
+  vi.fn<(opts: unknown) => Promise<{ ok: true }>>().mockResolvedValue({ ok: true })
+);
+vi.mock("../../src/observability/langfuse-auth-probe.js", () => ({
+  probeLangfuseAuth: probeMock,
+}));
+
 import { createTracer, getNoopActiveTrace } from "../../src/observability/langfuse.js";
 
 beforeEach(() => {
@@ -125,6 +135,9 @@ beforeEach(() => {
   coreFactory.mockClear();
   mockLogger.warn.mockClear();
   mockLogger.debug.mockClear();
+  mockLogger.info.mockClear();
+  mockLogger.error.mockClear();
+  probeMock.mockReset().mockResolvedValue({ ok: true });
 });
 
 describe("createTracer (no-op mode)", () => {
@@ -164,6 +177,75 @@ describe("createTracer (enabled mode)", () => {
     secretKey: "sk-test",
     host: "https://us.cloud.langfuse.com",
   };
+
+  describe("startup-probe wiring (closes #73)", () => {
+    it("ok result → info log; tracer still constructed", async () => {
+      probeMock.mockResolvedValue({ ok: true, projectId: "proj-abc" });
+      const tracer = await createTracer(enabledConfig);
+      expect(tracer).toBeDefined();
+      expect(NodeSDKCtor).toHaveBeenCalledTimes(1);
+      expect(sdkNodeStart).toHaveBeenCalledTimes(1);
+      const infoBlob = JSON.stringify(mockLogger.info.mock.calls);
+      expect(infoBlob).toMatch(/credentials verified/i);
+      expect(infoBlob).toContain("proj-abc");
+      expect(mockLogger.error).not.toHaveBeenCalled();
+    });
+
+    it("auth failure → log.error (NOT warn) with region-mismatch hint; tracer still constructed", async () => {
+      probeMock.mockResolvedValue({ ok: false, reason: "auth", status: 401 });
+      const tracer = await createTracer(enabledConfig);
+      expect(tracer).toBeDefined();
+      // PR-74 review I2: 401 must be log.error so production operators filtering at level>=error see it.
+      expect(mockLogger.error).toHaveBeenCalled();
+      const errorBlob = JSON.stringify(mockLogger.error.mock.calls);
+      expect(errorBlob).toMatch(/region mismatch/i);
+      // Critical: NO fall-back to no-op. The SDK must still be wired up.
+      expect(NodeSDKCtor).toHaveBeenCalledTimes(1);
+      expect(sdkNodeStart).toHaveBeenCalledTimes(1);
+    });
+
+    it("unexpected-shape result → log.error citing wrong-host; tracer still constructed", async () => {
+      probeMock.mockResolvedValue({ ok: false, reason: "unexpected-shape", status: 200 });
+      const tracer = await createTracer(enabledConfig);
+      expect(tracer).toBeDefined();
+      expect(mockLogger.error).toHaveBeenCalled();
+      expect(JSON.stringify(mockLogger.error.mock.calls)).toMatch(/wrong service|captive portal|projects payload/i);
+      expect(NodeSDKCtor).toHaveBeenCalledTimes(1);
+    });
+
+    it("transient probe failure (network/timeout/server) → log.warn; tracer still constructed", async () => {
+      for (const reason of ["network", "timeout", "server"] as const) {
+        probeMock.mockReset().mockResolvedValue(
+          reason === "server"
+            ? { ok: false, reason: "server", status: 503 }
+            : { ok: false, reason }
+        );
+        mockLogger.warn.mockClear();
+        mockLogger.error.mockClear();
+        NodeSDKCtor.mockClear();
+        sdkNodeStart.mockReset();
+        const tracer = await createTracer(enabledConfig);
+        expect(tracer, `reason=${reason}`).toBeDefined();
+        expect(mockLogger.warn, `reason=${reason}`).toHaveBeenCalled();
+        expect(JSON.stringify(mockLogger.warn.mock.calls)).toMatch(/probe could not complete/i);
+        expect(NodeSDKCtor, `reason=${reason}`).toHaveBeenCalledTimes(1);
+      }
+    });
+
+    it("probe is awaited before the SDK is constructed (order matters)", async () => {
+      const callOrder: string[] = [];
+      probeMock.mockImplementationOnce(async () => {
+        callOrder.push("probe");
+        return { ok: true };
+      });
+      NodeSDKCtor.mockImplementationOnce(() => {
+        callOrder.push("NodeSDK");
+        return { start: sdkNodeStart, shutdown: sdkNodeShutdown };
+      });
+      await createTracer(enabledConfig);
+      expect(callOrder).toEqual(["probe", "NodeSDK"]);
+    });
+  });
 
   it("registers the OTEL SDK and constructs the LangfuseClient with credentials", async () => {
     await createTracer(enabledConfig);
