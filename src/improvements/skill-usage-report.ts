@@ -52,6 +52,12 @@ export interface SkillUsageMetrics {
   readonly perSkill: readonly PerSkillMetrics[];
   /** Optional — surfaced from collectInvocations so the report flags transcript drift. */
   readonly parseStats?: ParseStats;
+  /**
+   * Count of vendored skill directories that `readVendoredSkills` could not
+   * read. A non-zero value means `[readVendoredSkills]` warnings were
+   * emitted to the sweep log and trial activity counts may be understated.
+   */
+  readonly skippedSkillsCount: number;
 }
 
 interface VerdictRule {
@@ -110,16 +116,31 @@ const VERDICT_RULES: Record<string, VerdictRule> = {
 
 const PROVENANCE_MARKER = "## Provenance";
 
+export interface ReadVendoredSkillsOptions {
+  /**
+   * Invoked once per directory entry that was skipped due to an fs error
+   * (in addition to the `[readVendoredSkills]` console.warn). Callers can
+   * tally these to surface a count to operators. Exceptions thrown from
+   * this callback are caught and logged — they will not abort the scan
+   * or lose readable siblings.
+   */
+  readonly onSkip?: (name: string, err: unknown) => void;
+}
+
 /**
  * Scan `.claude/skills/` for vendored skills — those whose SKILL.md carries
  * the provenance footer marker. Project-authored skills (without the marker)
  * are excluded so the trial's metrics stay scoped to the cherry-picked set.
  *
  * An fs error on a single skill (EACCES, EISDIR, ENOENT on a stale symlink,
- * etc.) emits a `[readVendoredSkills]` warning and skips that skill —
- * other readable skills are still returned, and the sweep continues.
+ * etc.) emits a `[readVendoredSkills]` warning, fires `options.onSkip`
+ * if provided, and skips that skill — other readable skills are still
+ * returned and the sweep continues.
  */
-export function readVendoredSkills(skillsDir: string): VendoredSkill[] {
+export function readVendoredSkills(
+  skillsDir: string,
+  options: ReadVendoredSkillsOptions = {}
+): VendoredSkill[] {
   if (!existsSync(skillsDir)) return [];
   const out: VendoredSkill[] = [];
   for (const name of readdirSync(skillsDir)) {
@@ -129,6 +150,7 @@ export function readVendoredSkills(skillsDir: string): VendoredSkill[] {
       isDir = statSync(skillDir).isDirectory();
     } catch (err) {
       warnSkipped(name, err);
+      notifySkip(options.onSkip, name, err);
       continue;
     }
     if (!isDir) continue;
@@ -141,6 +163,7 @@ export function readVendoredSkills(skillsDir: string): VendoredSkill[] {
       mtime = statSync(skillMd).mtime;
     } catch (err) {
       warnSkipped(name, err);
+      notifySkip(options.onSkip, name, err);
       continue;
     }
     if (!content.includes(PROVENANCE_MARKER)) continue;
@@ -161,13 +184,34 @@ function warnSkipped(name: string, err: unknown): void {
   );
 }
 
+function notifySkip(
+  callback: ReadVendoredSkillsOptions["onSkip"],
+  name: string,
+  err: unknown
+): void {
+  if (!callback) return;
+  // An observer callback must not break the scan loop — a buggy counter or
+  // a thrown logger here would drop readable siblings, undoing the
+  // swallow-and-continue invariant that's the whole point of warnSkipped.
+  try {
+    callback(name, err);
+  } catch (callbackErr) {
+    const code = (callbackErr as NodeJS.ErrnoException | undefined)?.code;
+    const message = callbackErr instanceof Error ? callbackErr.message : String(callbackErr);
+    console.warn(
+      `[readVendoredSkills] onSkip callback threw on ${name}: ${code ?? "UNKNOWN"} ${message}`
+    );
+  }
+}
+
 export function computeMetrics(
   invocations: readonly ClassifiedInvocation[],
   skills: readonly VendoredSkill[],
   windowStart: string,
   windowEnd: string,
   now: Date = new Date(),
-  parseStats?: ParseStats
+  parseStats?: ParseStats,
+  skippedSkillsCount: number = 0
 ): SkillUsageMetrics {
   const trialSkillNames = new Set(skills.map((s) => s.name));
   const trialInvocationList = invocations.filter((i) => trialSkillNames.has(i.skillName));
@@ -224,6 +268,7 @@ export function computeMetrics(
     trialSessionsUsedIn,
     perSkill,
     parseStats,
+    skippedSkillsCount,
   };
 }
 
@@ -277,6 +322,11 @@ export function renderReport(metrics: SkillUsageMetrics): string {
         ? `${ps.totalLines} lines, 0 malformed`
         : `${ps.totalLines} lines, ${ps.malformedLines} malformed ⚠️ — investigate transcript-format drift`;
     lines.push(`**Transcripts scanned:** ${ps.filesScanned} (${malformedNote})`);
+  }
+  if (metrics.skippedSkillsCount > 0) {
+    lines.push(
+      `**Skipped skills:** ${metrics.skippedSkillsCount} ⚠️ — see \`[readVendoredSkills]\` diagnostics in the launchd sweep log (\`~/Library/Logs/agentic-press-skill-metrics.log\`); trial counts below may be understated.`
+    );
   }
   // Distinguish trial-subset activity (counts in the per-skill table) from
   // total Skill-tool activity (includes non-trial skills like pr-review-toolkit,
