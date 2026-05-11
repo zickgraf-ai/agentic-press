@@ -123,6 +123,21 @@ describe("computeMetrics", () => {
     expect(m.trialInvocations).toBe(m.totalInvocations);
     expect(m.trialSessionsUsedIn).toBe(m.totalSessionsWithSkillActivity);
   });
+
+  it("counts a session once in both trial and total when it has both types", () => {
+    // Same sessionId for a vendored invocation AND a non-trial invocation —
+    // both Set-based session counters must dedupe to 1 each.
+    const skills = [skill("brainstorming", 7)];
+    const invocations: ClassifiedInvocation[] = [
+      inv({ skillName: "brainstorming", outcome: "completed", sessionId: "s1" }),
+      inv({ skillName: "pr-review-toolkit:review-pr", outcome: "completed", sessionId: "s1" }),
+    ];
+    const m = computeMetrics(invocations, skills, NOW.toISOString(), NOW.toISOString(), NOW);
+    expect(m.totalSessionsWithSkillActivity).toBe(1);
+    expect(m.trialSessionsUsedIn).toBe(1);
+    expect(m.totalInvocations).toBe(2);
+    expect(m.trialInvocations).toBe(1);
+  });
 });
 
 describe("computeMetrics — verdicts", () => {
@@ -267,6 +282,23 @@ describe("renderReport", () => {
     expect(out).toMatch(/Trial-skill activity:.*1 invocation across 1 session/);
     expect(out).toMatch(/All Skill-tool activity in window:.*3 invocations across 3 sessions/);
     expect(out).toMatch(/includes non-trial skills/);
+  });
+
+  it("flags malformed transcript lines in the report header when parseStats.malformedLines > 0", () => {
+    const skills = [skill("brainstorming", 7)];
+    const m = computeMetrics(
+      [],
+      skills,
+      NOW.toISOString(),
+      NOW.toISOString(),
+      NOW,
+      { filesScanned: 5, missingFiles: 0, totalLines: 200, malformedLines: 7 }
+    );
+    const out = renderReport(m);
+    expect(out).toMatch(/Transcripts scanned:.*5/);
+    expect(out).toMatch(/200 lines, 7 malformed/);
+    // Warning glyph must be present so the reader can't miss the signal.
+    expect(out).toContain("⚠️");
   });
 
   it("singular/plural agreement in the trial vs total activity counts", () => {

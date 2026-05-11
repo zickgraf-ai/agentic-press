@@ -43,7 +43,7 @@ export interface SkillUsageMetrics {
   readonly windowEnd: string;
   /** All `Skill` tool invocations observed in window (trial + non-trial). */
   readonly totalInvocations: number;
-  /** Invocations of a vendored / trial skill specifically (the subset in `perSkill`). */
+  /** Total invocations of vendored / trial skills (sum of all `perSkill[].invocations`). */
   readonly trialInvocations: number;
   /** Distinct sessions containing any `Skill` tool invocation. */
   readonly totalSessionsWithSkillActivity: number;
@@ -262,8 +262,8 @@ export function renderReport(metrics: SkillUsageMetrics): string {
   }
   // Distinguish trial-subset activity (counts in the per-skill table) from
   // total Skill-tool activity (includes non-trial skills like pr-review-toolkit,
-  // /loop, /schedule). Without this split, a reader sees "Sessions analyzed: 2"
-  // and the table showing 0 invocations everywhere and assumes the table is broken.
+  // /loop, /schedule). Without this split a reader could see high total counts
+  // alongside a table of zeros and assume the table is broken.
   lines.push(
     `**Trial-skill activity:** ${metrics.trialInvocations} invocation${metrics.trialInvocations === 1 ? "" : "s"} across ${metrics.trialSessionsUsedIn} session${metrics.trialSessionsUsedIn === 1 ? "" : "s"}`
   );
