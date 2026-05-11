@@ -51,6 +51,10 @@ const fs = require("fs");
 fs.appendFileSync(process.env.SBX_STUB_CALLS, JSON.stringify({ argv: process.argv.slice(1), env: process.env }) + "\\n");
 ' -- "$@"
 if [[ "$1" == "policy" && "$2" == "allow" ]]; then
+  if [[ -n "$SBX_STUB_FAIL_POLICY_ALLOW" ]]; then
+    echo "stubbed policy-allow failure" >&2
+    exit 88
+  fi
   echo "Allowed network policy 11111111-2222-3333-4444-555555555555"
 fi
 if [[ "$1" == "create" && -n "$SBX_STUB_FAIL_CREATE" ]]; then
@@ -475,5 +479,142 @@ describe("runDispatch (CLI E2E)", () => {
       hostEnv: envBase({ SBX_STUB_EXEC_EXIT: "42" }),
     });
     expect(STDERR_BUF.join("")).not.toContain(TOKEN);
+  });
+
+  it("MCP_PROXY_PORT env var is honored when --proxy-port is not passed", async () => {
+    harness = await buildHarness();
+    const workspace = freshWorkspace();
+    await runDispatchWithDeps([makeManifest(workspace)], {
+      controlPlaneClient: harness.cpClient,
+      sbxRunner: harness.sbxRunner,
+      mintSessionId: () => id("port1port1port1port1port1port1aa"),
+      hostEnv: envBase({ MCP_PROXY_PORT: "31337" }),
+    });
+    const cfg = JSON.parse(readFileSync(join(workspace, MCP_CONFIG_FILENAME), "utf8"));
+    expect(cfg.mcpServers["agentic-press"].url).toBe("http://host.docker.internal:31337/mcp");
+  });
+
+  it("--proxy-port flag overrides MCP_PROXY_PORT env", async () => {
+    harness = await buildHarness();
+    const workspace = freshWorkspace();
+    await runDispatchWithDeps([makeManifest(workspace), "--proxy-port", "40404"], {
+      controlPlaneClient: harness.cpClient,
+      sbxRunner: harness.sbxRunner,
+      mintSessionId: () => id("portfportfportfportfportfportfaa"),
+      hostEnv: envBase({ MCP_PROXY_PORT: "31337" }),
+    });
+    const cfg = JSON.parse(readFileSync(join(workspace, MCP_CONFIG_FILENAME), "utf8"));
+    expect(cfg.mcpServers["agentic-press"].url).toBe("http://host.docker.internal:40404/mcp");
+  });
+
+  it("--force overwrites a conflicting .mcp.json and lets the run succeed", async () => {
+    harness = await buildHarness();
+    const workspace = freshWorkspace();
+    writeFileSync(
+      join(workspace, MCP_CONFIG_FILENAME),
+      JSON.stringify({ mcpServers: { other: { type: "stdio", command: "x", args: [] } } }),
+      "utf8"
+    );
+    const code = await runDispatchWithDeps([makeManifest(workspace), "--force"], {
+      controlPlaneClient: harness.cpClient,
+      sbxRunner: harness.sbxRunner,
+      mintSessionId: () => id("forceforceforceforceforceforceaa"),
+      hostEnv: envBase(),
+    });
+    expect(code).toBe(0);
+    const cfg = JSON.parse(readFileSync(join(workspace, MCP_CONFIG_FILENAME), "utf8"));
+    expect(cfg.mcpServers["agentic-press"]).toBeDefined();
+    expect(cfg.mcpServers.other).toBeUndefined();
+    expect(harness.registry.size()).toBe(0);
+  });
+
+  it("allowNetwork failure at CLI level → exit 67, tearDown runs for the created sandbox", async () => {
+    // Sandbox creates fine, but policy allow fails — exit 67 + tearDown stop/rm
+    // still runs (no policy rm because no IDs captured).
+    harness = await buildHarness({ SBX_STUB_FAIL_POLICY_ALLOW: "1" });
+    const code = await runDispatchWithDeps([makeManifest(freshWorkspace())], {
+      controlPlaneClient: harness.cpClient,
+      sbxRunner: harness.sbxRunner,
+      mintSessionId: () => id("policy1policy1policy1policy1polaa"),
+      hostEnv: envBase({ SBX_STUB_FAIL_POLICY_ALLOW: "1" }),
+    });
+    expect(code).toBe(EXIT_CODES.SBX_FAIL);
+    expect(harness.registry.size()).toBe(0);
+    const argv = readFileSync(CALLS_FILE, "utf8")
+      .split("\n")
+      .filter((l) => l.length > 0)
+      .map((l) => JSON.parse(l).argv);
+    expect(argv.some((a: string[]) => a[0] === "create")).toBe(true);
+    expect(argv.some((a: string[]) => a[0] === "stop")).toBe(true);
+    expect(argv.some((a: string[]) => a[0] === "rm")).toBe(true);
+    // No policy IDs to clean — policy rm should NOT appear
+    expect(argv.some((a: string[]) => a[0] === "policy" && a[1] === "rm")).toBe(false);
+  });
+
+  it("when both agent exits non-zero AND cleanup leaks → exit 70 with original exit code logged", async () => {
+    // Combination: agent returns 42 + tearDown fails. Expect exit 70 (leak wins),
+    // and an operator-visible stderr line citing the original 42.
+    harness = await buildHarness({ SBX_STUB_EXEC_EXIT: "42", SBX_STUB_FAIL_TEARDOWN: "1" });
+    const code = await runDispatchWithDeps([makeManifest(freshWorkspace())], {
+      controlPlaneClient: harness.cpClient,
+      sbxRunner: harness.sbxRunner,
+      mintSessionId: () => id("dualfail1dualfail1dualfail1duala"),
+      hostEnv: envBase({ SBX_STUB_EXEC_EXIT: "42", SBX_STUB_FAIL_TEARDOWN: "1" }),
+    });
+    expect(code).toBe(EXIT_CODES.CLEANUP_LEAK);
+    const stderrJoined = STDERR_BUF.join("");
+    expect(stderrJoined).toMatch(/Original exit code 42/i);
+    expect(stderrJoined).toMatch(/overridden to 70/i);
+  });
+});
+
+describe("parseArgs (via runDispatchWithDeps exit codes)", () => {
+  it("no manifest path → exit 64 with usage message", async () => {
+    STDERR_BUF = [];
+    const code = await runDispatchWithDeps([], { hostEnv: envBase() });
+    expect(code).toBe(EXIT_CODES.MANIFEST_INVALID);
+    expect(STDERR_BUF.join("")).toMatch(/Usage: apd/);
+  });
+
+  it("--workspace without value → exit 64", async () => {
+    STDERR_BUF = [];
+    const code = await runDispatchWithDeps(["manifest.json", "--workspace"], { hostEnv: envBase() });
+    expect(code).toBe(EXIT_CODES.MANIFEST_INVALID);
+    expect(STDERR_BUF.join("")).toMatch(/--workspace requires a value/);
+  });
+
+  it("--proxy-port without value → exit 64", async () => {
+    STDERR_BUF = [];
+    const code = await runDispatchWithDeps(["manifest.json", "--proxy-port"], { hostEnv: envBase() });
+    expect(code).toBe(EXIT_CODES.MANIFEST_INVALID);
+    expect(STDERR_BUF.join("")).toMatch(/--proxy-port requires a value/);
+  });
+
+  it("--proxy-port non-numeric → exit 64", async () => {
+    STDERR_BUF = [];
+    const code = await runDispatchWithDeps(["manifest.json", "--proxy-port", "abc"], { hostEnv: envBase() });
+    expect(code).toBe(EXIT_CODES.MANIFEST_INVALID);
+    expect(STDERR_BUF.join("")).toMatch(/Invalid --proxy-port/);
+  });
+
+  it("--proxy-port out of range → exit 64", async () => {
+    STDERR_BUF = [];
+    const code = await runDispatchWithDeps(["manifest.json", "--proxy-port", "99999"], { hostEnv: envBase() });
+    expect(code).toBe(EXIT_CODES.MANIFEST_INVALID);
+    expect(STDERR_BUF.join("")).toMatch(/Invalid --proxy-port/);
+  });
+
+  it("unknown flag → exit 64", async () => {
+    STDERR_BUF = [];
+    const code = await runDispatchWithDeps(["manifest.json", "--what"], { hostEnv: envBase() });
+    expect(code).toBe(EXIT_CODES.MANIFEST_INVALID);
+    expect(STDERR_BUF.join("")).toMatch(/Unknown flag/);
+  });
+
+  it("two positional args → exit 64", async () => {
+    STDERR_BUF = [];
+    const code = await runDispatchWithDeps(["one.json", "two.json"], { hostEnv: envBase() });
+    expect(code).toBe(EXIT_CODES.MANIFEST_INVALID);
+    expect(STDERR_BUF.join("")).toMatch(/Unexpected positional argument/);
   });
 });

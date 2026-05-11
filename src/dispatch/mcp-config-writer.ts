@@ -4,6 +4,13 @@ import type { SessionId } from "../orchestrator/session-id.js";
 
 export const MCP_CONFIG_FILENAME = ".mcp.json";
 
+export class McpConfigConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "McpConfigConflictError";
+  }
+}
+
 export interface WriteMcpConfigOptions {
   readonly workspace: string;
   readonly sessionId: SessionId;
@@ -29,7 +36,18 @@ function buildConfig(opts: WriteMcpConfigOptions): unknown {
 
 export function writeMcpConfig(opts: WriteMcpConfigOptions): string {
   // realpathSync first — a symlinked workspace must not steer the write outside.
-  const realWs = realpathSync(opts.workspace);
+  // FS errors here (broken symlink, permission denied, ENOTDIR) bubble up as
+  // plain `Error`; only the "file already exists" case throws McpConfigConflictError
+  // so the CLI can distinguish exit 69 (conflict) from exit 68 (workspace problem).
+  let realWs: string;
+  try {
+    realWs = realpathSync(opts.workspace);
+  } catch (err) {
+    const code = (err as { code?: string } | null)?.code;
+    throw new Error(
+      `Cannot canonicalize workspace "${opts.workspace}" (${code ?? "unknown error"})`
+    );
+  }
   const target = join(realWs, MCP_CONFIG_FILENAME);
   const desired = JSON.stringify(buildConfig(opts), null, 2) + "\n";
 
@@ -42,7 +60,7 @@ export function writeMcpConfig(opts: WriteMcpConfigOptions): string {
       return target;
     }
     if (!opts.force) {
-      throw new Error(
+      throw new McpConfigConflictError(
         `Refusing to overwrite existing ${MCP_CONFIG_FILENAME} at ${target} — pass --force to overwrite.`
       );
     }

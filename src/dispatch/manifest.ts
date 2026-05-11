@@ -17,14 +17,23 @@ export interface AgentManifest {
   readonly agents: readonly AgentManifestEntry[];
 }
 
-// Share the control-plane's validator so a parsed manifest cannot 400 at register time.
+// Share the control-plane's validator so a parsed manifest cannot 400 at
+// register time. The sessionId is known only at mint time, so we pass a fixed
+// well-formed placeholder and rely on validateSessionInput's order to short-
+// circuit on the agentType + allowedTools branches we actually care about.
+// If validateSessionInput is ever reordered to check sessionId last or to
+// add cross-field rules, this fixture goes stale silently — guard with the
+// "shared-contract" tests in tests/orchestrator/session-id.test.ts.
+const PLACEHOLDER_SESSION_ID = "placeholder";
 function validateAgentTypeAndAllowedTools(
   agentType: unknown,
   allowedTools: unknown
 ): { ok: true } | { ok: false; error: string } {
-  // Pass a placeholder sessionId; this helper only consults the agentType +
-  // allowedTools branches. The real sessionId isn't known until mint time.
-  return validateSessionInput({ sessionId: "placeholder", agentType, allowedTools });
+  return validateSessionInput({
+    sessionId: PLACEHOLDER_SESSION_ID,
+    agentType,
+    allowedTools,
+  });
 }
 
 export function parseManifestFile(path: string): AgentManifest {

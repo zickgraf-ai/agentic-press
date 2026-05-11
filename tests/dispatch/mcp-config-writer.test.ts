@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, afterAll } from "vitest";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, statSync, chmodSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { writeMcpConfig, MCP_CONFIG_FILENAME } from "../../src/dispatch/mcp-config-writer.js";
+import { writeMcpConfig, MCP_CONFIG_FILENAME, McpConfigConflictError } from "../../src/dispatch/mcp-config-writer.js";
 import { asSessionId } from "../../src/orchestrator/session-id.js";
 
 let TMP_ROOT: string;
@@ -77,14 +77,29 @@ describe("writeMcpConfig", () => {
     expect(statSync(written).mode & 0o777).toBe(0o644);
   });
 
-  it("refuses to overwrite a conflicting .mcp.json without force", () => {
+  it("refuses to overwrite a conflicting .mcp.json without force (throws McpConfigConflictError)", () => {
     const ws = freshWorkspace();
     writeFileSync(
       join(ws, MCP_CONFIG_FILENAME),
       JSON.stringify({ mcpServers: { other: { type: "stdio", command: "x", args: [] } } }),
       "utf8"
     );
+    expect(() => writeMcpConfig({ workspace: ws, ...SAMPLE })).toThrow(McpConfigConflictError);
     expect(() => writeMcpConfig({ workspace: ws, ...SAMPLE })).toThrow(/already exists|--force/i);
+  });
+
+  it("realpathSync errors throw a non-conflict Error (so CLI maps to exit 68, not 69)", () => {
+    const linkPath = join(TMP_ROOT, `broken-rl-${Date.now()}`);
+    symlinkSync(join(TMP_ROOT, "does-not-exist-target"), linkPath, "dir");
+    let caught: unknown;
+    try {
+      writeMcpConfig({ workspace: linkPath, ...SAMPLE });
+    } catch (err) {
+      caught = err;
+    }
+    expect(caught).toBeInstanceOf(Error);
+    expect(caught).not.toBeInstanceOf(McpConfigConflictError);
+    expect((caught as Error).message).toMatch(/canonicalize|ENOENT/i);
   });
 
   it("overwrites a conflicting .mcp.json with force: true and lands at 0644", () => {

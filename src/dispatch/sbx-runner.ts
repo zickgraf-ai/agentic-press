@@ -1,4 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
+import { constants as osConstants } from "node:os";
 import { childLogger } from "../logger.js";
 
 const log = childLogger("sbx-runner");
@@ -46,6 +47,18 @@ interface SpawnResult {
   stderr: string;
 }
 
+// Standard POSIX convention: a process killed by a signal exits with 128 + signum.
+// Node's exit listener gives us either `code` (clean exit) or `signal` (killed).
+function resolveExitCode(code: number | null, signal: NodeJS.Signals | null): number {
+  if (code !== null) return code;
+  if (signal !== null) {
+    const signumMap = osConstants.signals as Record<string, number>;
+    const signum = signumMap[signal];
+    if (typeof signum === "number") return 128 + signum;
+  }
+  return -1;
+}
+
 function runSbx(
   binary: string,
   args: readonly string[],
@@ -79,9 +92,9 @@ function runSbx(
       options.signal?.removeEventListener("abort", onAbort);
       reject(err);
     });
-    child.on("exit", (code) => {
+    child.on("exit", (code, signal) => {
       options.signal?.removeEventListener("abort", onAbort);
-      resolve({ exitCode: code ?? -1, stdout, stderr });
+      resolve({ exitCode: resolveExitCode(code, signal), stdout, stderr });
     });
   });
 }
@@ -168,15 +181,24 @@ export function createSbxRunner(opts: SbxRunnerOptions = {}): SbxRunner {
       }
       const combined = result.stdout + result.stderr;
       const matches = combined.match(UUID_PATTERN) ?? [];
+      if (matches.length === 0) {
+        // Exit 0 but no UUIDs extracted — sbx output format may have changed.
+        // tearDown can't revoke policies we didn't capture, so they would leak.
+        log.warn(
+          { port, stdout: result.stdout.slice(0, 200), stderr: result.stderr.slice(0, 200) },
+          "allowNetwork extracted zero policy IDs from sbx output — policy cleanup will be skipped"
+        );
+      }
       return { policyIds: matches };
     },
 
     async execAgent({ name, command, signal }) {
       const args = ["exec", name, ...command];
       const env = filterEnv(hostEnv);
-      // Inherit stdio in production so the operator sees what the agent says
-      // in real time. Tests use the stub which writes via fs.appendFileSync.
-      const inheritStdio = !process.env.SBX_STUB_CALLS;
+      // Inherit stdio in production so the operator sees the agent in real
+      // time. Tests inject SBX_STUB_CALLS via hostEnv to flip to captured
+      // pipes (the stub writes via fs.appendFileSync, so stdio isn't needed).
+      const inheritStdio = !hostEnv.SBX_STUB_CALLS;
       const result = await runSbx(binary, args, env, { inheritStdio, signal });
       return { exitCode: result.exitCode };
     },

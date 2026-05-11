@@ -161,16 +161,19 @@ Exit codes:
 |---|---|
 | 0 | Agent exited 0, cleanup clean |
 | (agent's) | Agent non-zero, cleanup clean |
-| 64 | Manifest invalid (parse, schema, or Tier 1.4 multi-agent guardrail) |
+| 64 | Manifest invalid (parse, schema, single-agent guardrail, or bad CLI flag) |
 | 65 | `MCP_CONTROL_TOKEN` missing on host |
-| 66 | Control-plane registration failed (401 / 400 / 5xx / network) |
+| 66 | Control-plane registration failed (401 / 400 / 5xx / network / timeout) |
 | 67 | sbx command failed (create / exec / policy) |
+| 68 | Workspace path invalid (`--workspace`, manifest `workspace`, or broken symlink / permission error during canonicalization) |
 | 69 | Conflicting pre-existing `.mcp.json` without `--force` |
-| 70 | Cleanup leak — registry DELETE failed. Recover with `curl -X DELETE -H "Authorization: Bearer …" http://127.0.0.1:18924/sessions/<id>` or restart the proxy (registry is in-memory). |
+| 70 | Cleanup leak — registry DELETE OR sbx tearDown (stop / rm / policy rm) failed. Recover with `curl -X DELETE -H "Authorization: Bearer …" http://127.0.0.1:18924/sessions/<id>`, `sbx rm <name>`, and `sbx policy rm network --id <id>`. The registry is in-memory; restarting the proxy also clears any leaked session. |
+| 71 | Internal error — dispatch CLI itself crashed (e.g. unhandled rejection). Distinguishable from "agent exited 1". |
+| 130 | Cleanup ran after SIGINT / SIGTERM. (Second signal or 5s timeout forces this exit even if cleanup is still draining.) |
 
-What gets written into the workspace: a single `.mcp.json` at the workspace root pointing the agent at `http://host.docker.internal:18923/mcp` with `X-Agent-Session-Id` and `X-Agent-Type` headers wired in. Mode 0644, host-writable only. Idempotent if re-run with the same identity.
+What gets written into the workspace: a single `.mcp.json` at the workspace root pointing the agent at `http://host.docker.internal:18923/mcp` with `X-Agent-Session-Id` and `X-Agent-Type` headers wired in. Mode 0644 (owner-readable/writable, group/other read-only); idempotent if re-run with the same identity.
 
-Tier 1.4 dispatches one agent per invocation. Parallel multi-agent dispatch is Tier 1.5.
+The dispatch CLI accepts exactly one agent per manifest. Multi-agent dispatch is a planned extension.
 
 ## Network policy reference
 

@@ -63,7 +63,10 @@ function extractCode(value: unknown): string | undefined {
   return undefined;
 }
 
-// undici wraps connection failures as AggregateError under cause.errors[].
+// Node's fetch implementation wraps connection failures as AggregateError
+// under cause.errors[]. We walk all the documented and observed shapes; if a
+// future implementation rearranges them, the last-resort TypeError fallback
+// below classifies "fetch failed" as a connect error.
 function classifyFetchError(err: unknown): ControlPlaneFailure | undefined {
   if (!(err instanceof Error)) return undefined;
   const direct = extractCode(err);
@@ -80,13 +83,13 @@ function classifyFetchError(err: unknown): ControlPlaneFailure | undefined {
       }
     }
   }
-  // Last-resort fallback: undici raises TypeError for *all* network-layer
+  // Last-resort fallback: Node's fetch raises TypeError for all network-layer
   // failures. If we couldn't extract a code from any of the standard shapes,
   // a bare "fetch failed" TypeError is overwhelmingly a connectivity issue
   // and giving the operator the connect-error message is more useful than a
   // generic "unexpected".
   if (err.name === "TypeError" && /fetch failed/i.test(err.message)) {
-    return { kind: "connect", detail: "fetch failed (undici did not surface a code — check that the proxy is running)" };
+    return { kind: "connect", detail: "fetch failed (no error code surfaced — check that the proxy is running)" };
   }
   return undefined;
 }
@@ -184,14 +187,7 @@ export function createControlPlaneClient(opts: ControlPlaneClientOptions): Contr
       );
       if (res.status === 201) return;
       if (res.status === 400) {
-        let serverMessage = "(no message)";
-        try {
-          const body = (await res.json()) as { error?: unknown };
-          if (typeof body.error === "string") serverMessage = body.error;
-        } catch {
-          // Body wasn't valid JSON — fall through to "(no message)".
-        }
-        throw new ControlPlaneError({ kind: "validation", serverMessage });
+        throw new ControlPlaneError({ kind: "validation", serverMessage: await extractServerMessage(res) });
       }
       throw new ControlPlaneError({ kind: "server", status: res.status, attempts: 1 });
     },
@@ -216,16 +212,32 @@ export function createControlPlaneClient(opts: ControlPlaneClientOptions): Contr
         return;
       }
       if (res.status === 400) {
-        let serverMessage = "(no message)";
-        try {
-          const body = (await res.json()) as { error?: unknown };
-          if (typeof body.error === "string") serverMessage = body.error;
-        } catch {
-          // Body wasn't valid JSON — fall through to "(no message)".
-        }
-        throw new ControlPlaneError({ kind: "validation", serverMessage });
+        throw new ControlPlaneError({ kind: "validation", serverMessage: await extractServerMessage(res) });
       }
       throw new ControlPlaneError({ kind: "server", status: res.status, attempts: 1 });
     },
   };
+}
+
+// Pull the operator-readable diagnostic out of a 4xx response. Prefer the
+// server's `{ error }` field; if the body isn't JSON, fall back to the raw text
+// so the operator still sees what the server said. Logs the raw body on JSON
+// parse failure so unexpected response shapes are diagnosable.
+async function extractServerMessage(res: Response): Promise<string> {
+  let text: string;
+  try {
+    text = await res.text();
+  } catch {
+    return "(could not read response body)";
+  }
+  if (!text) return "(no message)";
+  try {
+    const body = JSON.parse(text) as { error?: unknown };
+    if (typeof body.error === "string") return body.error;
+    log.warn({ status: res.status, body: text.slice(0, 200) }, "control-plane 4xx returned JSON without a string error field");
+    return text;
+  } catch {
+    log.warn({ status: res.status, body: text.slice(0, 200) }, "control-plane 4xx body was not JSON");
+    return text;
+  }
 }

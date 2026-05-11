@@ -7,7 +7,7 @@ import {
   type ControlPlaneClient,
 } from "./control-plane-client.js";
 import { createSbxRunner, type SbxRunner } from "./sbx-runner.js";
-import { writeMcpConfig } from "./mcp-config-writer.js";
+import { writeMcpConfig, McpConfigConflictError } from "./mcp-config-writer.js";
 
 const log = childLogger("dispatch");
 
@@ -165,8 +165,7 @@ export async function runDispatchWithDeps(argv: readonly string[], deps: Dispatc
   }
 
   // Past this point, every exit path must run the finally cleanup.
-  let agentExitCode = 0;
-  let earlyExitCode: ExitCode | undefined;
+  let intendedExit: ExitCode = EXIT_CODES.OK;
   let thrownDuringRun: unknown;
   let createdSandbox = false;
   let policyIds: readonly string[] = [];
@@ -182,8 +181,14 @@ export async function runDispatchWithDeps(argv: readonly string[], deps: Dispatc
       });
     } catch (err) {
       process.stderr.write(`${err instanceof Error ? err.message : err}\n`);
-      earlyExitCode = EXIT_CODES.MCP_CONFIG_CONFLICT;
-      return earlyExitCode;
+      // Distinguish "file already exists" (operator can pass --force) from
+      // workspace/FS errors (broken symlink, ENOTDIR, etc.) so the exit code
+      // points at the right fix.
+      intendedExit =
+        err instanceof McpConfigConflictError
+          ? EXIT_CODES.MCP_CONFIG_CONFLICT
+          : EXIT_CODES.WORKSPACE_INVALID;
+      return intendedExit;
     }
 
     try {
@@ -195,8 +200,8 @@ export async function runDispatchWithDeps(argv: readonly string[], deps: Dispatc
       createdSandbox = true;
     } catch (err) {
       process.stderr.write(`sbx create failed: ${err instanceof Error ? err.message : err}\n`);
-      earlyExitCode = EXIT_CODES.SBX_FAIL;
-      return earlyExitCode;
+      intendedExit = EXIT_CODES.SBX_FAIL;
+      return intendedExit;
     }
 
     try {
@@ -204,8 +209,8 @@ export async function runDispatchWithDeps(argv: readonly string[], deps: Dispatc
       policyIds = ids;
     } catch (err) {
       process.stderr.write(`sbx policy allow failed: ${err instanceof Error ? err.message : err}\n`);
-      earlyExitCode = EXIT_CODES.SBX_FAIL;
-      return earlyExitCode;
+      intendedExit = EXIT_CODES.SBX_FAIL;
+      return intendedExit;
     }
 
     try {
@@ -214,13 +219,13 @@ export async function runDispatchWithDeps(argv: readonly string[], deps: Dispatc
         command: entry.agentCommand,
         signal: deps.signal,
       });
-      agentExitCode = result.exitCode;
-      return agentExitCode;
+      intendedExit = result.exitCode;
+      return intendedExit;
     } catch (err) {
       thrownDuringRun = err;
       process.stderr.write(`sbx exec failed: ${err instanceof Error ? err.message : err}\n`);
-      earlyExitCode = EXIT_CODES.SBX_FAIL;
-      return earlyExitCode;
+      intendedExit = EXIT_CODES.SBX_FAIL;
+      return intendedExit;
     }
   } finally {
     // Cleanup — best-effort but loud on failure. Leaks exit non-zero (70).
@@ -259,12 +264,18 @@ export async function runDispatchWithDeps(argv: readonly string[], deps: Dispatc
     }
 
     if (cleanupLeak) {
-      // If the try block also threw, surface that information before the
-      // CLEANUP_LEAK return discards it.
+      // Surface what we WERE going to return before the override discards it —
+      // the operator needs to see both the original failure (if any) and the
+      // intended exit code, because the leak is what they have to clean up next.
       if (thrownDuringRun !== undefined) {
         log.error(
           { err: thrownDuringRun instanceof Error ? thrownDuringRun.message : thrownDuringRun },
           "original failure preceding cleanup leak"
+        );
+      }
+      if (intendedExit !== EXIT_CODES.OK) {
+        process.stderr.write(
+          `Original exit code ${intendedExit} overridden to ${EXIT_CODES.CLEANUP_LEAK} due to cleanup leak.\n`
         );
       }
       // eslint-disable-next-line no-unsafe-finally
