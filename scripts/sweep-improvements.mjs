@@ -84,6 +84,20 @@ let auditWritten = 0;
 let auditSkipped = 0;
 let skillMetricsWritten = 0;
 let skillMetricsSkipped = 0;
+let auditFailed = false;
+let skillMetricsFailed = false;
+
+// Phase-level catches preserve the "one bad phase does not block the other"
+// invariant. The phase-failed flags drive the final non-zero exit so the
+// sweep failure is visible (launchd surfaces a non-zero exit; a buried
+// console.error in a log file nobody reads is not enough — see #64).
+function logPhaseFailure(phase, err) {
+  const code = err && err.code ? err.code : "UNKNOWN";
+  const name = err && err.name ? err.name : "Error";
+  const message = err instanceof Error ? err.message : String(err);
+  console.error(`[sweep:${phase}] FAILED (${name} ${code}): ${message}`);
+  if (err && err.stack) console.error(err.stack);
+}
 
 // ---- Phase 1: Audit ----
 if (!opts.skipAudit) {
@@ -112,8 +126,8 @@ if (!opts.skipAudit) {
         auditWritten++;
       }
     } catch (err) {
-      console.error(`[sweep:audit] FAILED: ${err.message}`);
-      if (err.stack) console.error(err.stack);
+      auditFailed = true;
+      logPhaseFailure("audit", err);
     }
   }
 }
@@ -173,14 +187,21 @@ if (!opts.skipSkillMetrics) {
       }
     }
   } catch (err) {
-    console.error(`[sweep:skill] FAILED: ${err.message}`);
-    if (err.stack) console.error(err.stack);
+    skillMetricsFailed = true;
+    logPhaseFailure("skill", err);
   }
 }
 
 console.log(
   `[sweep] done — audit: wrote ${auditWritten}, skipped ${auditSkipped} | skill: wrote ${skillMetricsWritten}, skipped ${skillMetricsSkipped}`
 );
+
+if (auditFailed || skillMetricsFailed) {
+  // Non-zero exit so launchd's wrapper sees the failure (and so any future
+  // CI invocation gates on it). Both phases still ran — see logPhaseFailure
+  // above — only the final exit code is escalated.
+  process.exitCode = 1;
+}
 
 function parseEntries(text) {
   const entries = [];
