@@ -1,6 +1,7 @@
 import type { AuditStatus } from "../types.js";
 import type { LangfuseConfig } from "./config.js";
 import { childLogger } from "../logger.js";
+import { probeLangfuseAuth } from "./langfuse-auth-probe.js";
 
 const log = childLogger("langfuse");
 
@@ -193,6 +194,39 @@ export async function createTracer(config: LangfuseConfig): Promise<Tracer> {
       TRACE_METADATA: string;
     };
   }).LangfuseOtelSpanAttributes;
+
+  // Startup probe — confirm the credentials actually authenticate against the
+  // configured host before we tell the operator "tracing enabled." The SDK
+  // accepts mismatched key/host (e.g. US-region keys with the default EU host)
+  // and silently 401s on every upload, with no observability that traces are
+  // disappearing. The probe surfaces this as a loud startup warn. We do NOT
+  // fall back to no-op on failure — the operator may fix env without
+  // restarting, and the tracer should resume working when it succeeds.
+  const probe = await probeLangfuseAuth({
+    host: config.host,
+    publicKey: config.publicKey,
+    secretKey: config.secretKey,
+  });
+  if (probe.ok) {
+    log.info(
+      { host: config.host, ...(probe.projectId ? { projectId: probe.projectId } : {}) },
+      "Langfuse credentials verified at startup"
+    );
+  } else if (probe.reason === "auth") {
+    log.warn(
+      { host: config.host, status: probe.status },
+      "Langfuse credentials rejected (HTTP " +
+        probe.status +
+        ") — likely region mismatch. Check that LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY match the region of LANGFUSE_HOST. Traces will not upload until corrected."
+    );
+  } else {
+    log.warn(
+      { host: config.host, reason: probe.reason },
+      "Langfuse credential probe could not complete (" +
+        probe.reason +
+        ") — proceeding with tracer setup; the probe failure may be transient."
+    );
+  }
 
   // OTEL NodeSDK setup. The LangfuseSpanProcessor batches observations and
   // uploads them to Langfuse on flush/shutdown. Failure here means we cannot
