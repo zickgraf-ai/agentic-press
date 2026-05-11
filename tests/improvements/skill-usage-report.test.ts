@@ -284,6 +284,35 @@ describe("renderReport", () => {
     expect(out).toMatch(/includes non-trial skills/);
   });
 
+  it("flags skipped skills in the report header when skippedSkillsCount > 0", () => {
+    const skills = [skill("brainstorming", 7)];
+    const m = computeMetrics(
+      [],
+      skills,
+      NOW.toISOString(),
+      NOW.toISOString(),
+      NOW,
+      undefined,
+      2
+    );
+    const out = renderReport(m);
+    expect(out).toMatch(/Skipped skills:.*2/);
+    expect(out).toContain("⚠️");
+    expect(out).toContain("[readVendoredSkills]");
+  });
+
+  it("omits the skipped-skills header line when count is 0 or undefined", () => {
+    const skills = [skill("brainstorming", 7)];
+    const zero = renderReport(
+      computeMetrics([], skills, NOW.toISOString(), NOW.toISOString(), NOW, undefined, 0)
+    );
+    const undef = renderReport(
+      computeMetrics([], skills, NOW.toISOString(), NOW.toISOString(), NOW)
+    );
+    expect(zero).not.toMatch(/Skipped skills:/);
+    expect(undef).not.toMatch(/Skipped skills:/);
+  });
+
   it("flags malformed transcript lines in the report header when parseStats.malformedLines > 0", () => {
     const skills = [skill("brainstorming", 7)];
     const m = computeMetrics(
@@ -376,6 +405,45 @@ describe("readVendoredSkills", () => {
     writeFileSync(join(skillsRoot, "loose-file.md"), "## Provenance\n");
     mkdirSync(join(skillsRoot, "no-skill-md-here"));
     expect(readVendoredSkills(skillsRoot)).toEqual([]);
+  });
+
+  it("invokes options.onSkip once per skipped directory entry", () => {
+    const skillsRoot = join(tmpRoot, ".claude", "skills");
+    mkdirSync(join(skillsRoot, "readable"), { recursive: true });
+    writeFileSync(
+      join(skillsRoot, "readable", "SKILL.md"),
+      "---\nname: readable\n---\n\n## Provenance\n\nVendored.\n"
+    );
+    symlinkSync(join(tmpRoot, "nope"), join(skillsRoot, "broken"));
+
+    const skipped: Array<{ name: string; code: string | undefined }> = [];
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const skills = readVendoredSkills(skillsRoot, {
+        onSkip: (name, err) => {
+          skipped.push({ name, code: (err as NodeJS.ErrnoException).code });
+        },
+      });
+      expect(skills.map((s) => s.name)).toEqual(["readable"]);
+      expect(skipped).toEqual([{ name: "broken", code: "ENOENT" }]);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("still warns to console.warn when options.onSkip is provided (callback is additive, not replacing)", () => {
+    const skillsRoot = join(tmpRoot, ".claude", "skills");
+    mkdirSync(join(skillsRoot, "wedged"), { recursive: true });
+    mkdirSync(join(skillsRoot, "wedged", "SKILL.md"));
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      readVendoredSkills(skillsRoot, { onSkip: () => {} });
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      expect(String(warnSpy.mock.calls[0]![0])).toContain("[readVendoredSkills]");
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 
   it("warns and continues when the skill directory can't be stat'd (broken symlink), returning readable siblings", () => {

@@ -147,7 +147,12 @@ if (!opts.skipSkillMetrics) {
     const windowStart = new Date(now.getTime() - lookbackMs).toISOString();
     const windowEnd = now.toISOString();
 
-    const skills = readVendoredSkills(skillsDir);
+    let skippedSkillsCount = 0;
+    const skills = readVendoredSkills(skillsDir, {
+      onSkip: () => {
+        skippedSkillsCount++;
+      },
+    });
     if (skills.length === 0) {
       console.log(`[sweep:skill] no vendored skills found in ${skillsDir} — skipping skill-metrics phase`);
     } else {
@@ -160,7 +165,8 @@ if (!opts.skipSkillMetrics) {
         windowStart,
         windowEnd,
         now,
-        parseStats
+        parseStats,
+        skippedSkillsCount
       );
       const metricsDir = join(dir, "metrics");
       if (!existsSync(metricsDir)) mkdirSync(metricsDir, { recursive: true });
@@ -173,6 +179,12 @@ if (!opts.skipSkillMetrics) {
       console.log(
         `[sweep:skill] parsed ${parseStats.filesScanned} files, ${parseStats.totalLines} lines, ${parseStats.malformedLines} malformed`
       );
+      if (skippedSkillsCount > 0) {
+        // Echo the skip count to stdout so a casual sweep log scan flags it
+        // alongside the markdown header (#66). The per-skill detail is already
+        // in the [readVendoredSkills] warn lines higher in the same log.
+        console.log(`[sweep:skill] ${skippedSkillsCount} skill(s) skipped due to fs errors — see warnings above`);
+      }
 
       // Run anti-signal detector.
       const skillSuggestions = detectSkillUsageImprovements(invocations, skills, { now });
