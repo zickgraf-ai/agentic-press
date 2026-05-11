@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, utimesSync } from "node:fs";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, utimesSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -376,5 +376,40 @@ describe("readVendoredSkills", () => {
     writeFileSync(join(skillsRoot, "loose-file.md"), "## Provenance\n");
     mkdirSync(join(skillsRoot, "no-skill-md-here"));
     expect(readVendoredSkills(skillsRoot)).toEqual([]);
+  });
+
+  it("warns and continues when a SKILL.md is unreadable, returning the readable skills", () => {
+    // Skip under root (e.g., some CI / docker images) where chmod 000 doesn't
+    // produce EACCES on read — the test then can't provoke the catch path.
+    if (typeof process.getuid === "function" && process.getuid() === 0) {
+      return;
+    }
+    const skillsRoot = join(tmpRoot, ".claude", "skills");
+    mkdirSync(join(skillsRoot, "readable"), { recursive: true });
+    mkdirSync(join(skillsRoot, "unreadable"), { recursive: true });
+    const readableMd = join(skillsRoot, "readable", "SKILL.md");
+    const unreadableMd = join(skillsRoot, "unreadable", "SKILL.md");
+    writeFileSync(
+      readableMd,
+      "---\nname: readable\n---\n\n# X\n\n## Provenance\n\nVendored.\n"
+    );
+    writeFileSync(
+      unreadableMd,
+      "---\nname: unreadable\n---\n\n# X\n\n## Provenance\n\nVendored.\n"
+    );
+    chmodSync(unreadableMd, 0o000);
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const skills = readVendoredSkills(skillsRoot);
+      expect(skills.map((s) => s.name)).toEqual(["readable"]);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      const message = String(warnSpy.mock.calls[0]![0]);
+      expect(message).toMatch(/^\[readVendoredSkills\] skipped unreadable: /);
+    } finally {
+      // Restore perms so afterEach rmSync can clean up the tmp dir.
+      chmodSync(unreadableMd, 0o644);
+      warnSpy.mockRestore();
+    }
   });
 });

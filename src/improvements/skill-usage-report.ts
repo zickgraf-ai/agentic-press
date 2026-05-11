@@ -123,7 +123,10 @@ export function readVendoredSkills(skillsDir: string): VendoredSkill[] {
     let isDir = false;
     try {
       isDir = statSync(skillDir).isDirectory();
-    } catch {
+    } catch (err) {
+      console.warn(
+        `[readVendoredSkills] skipped ${name}: ${(err as Error).message}`
+      );
       continue;
     }
     if (!isDir) continue;
@@ -134,7 +137,10 @@ export function readVendoredSkills(skillsDir: string): VendoredSkill[] {
     try {
       content = readFileSync(skillMd, "utf8");
       mtime = statSync(skillMd).mtime;
-    } catch {
+    } catch (err) {
+      console.warn(
+        `[readVendoredSkills] skipped ${name}: ${(err as Error).message}`
+      );
       continue;
     }
     if (!content.includes(PROVENANCE_MARKER)) continue;
