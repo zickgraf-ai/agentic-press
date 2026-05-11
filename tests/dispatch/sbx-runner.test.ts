@@ -133,6 +133,87 @@ describe("sbx-runner", () => {
     expect(exitCode).toBe(42);
   });
 
+  it("forwards corporate-network env vars (HTTP_PROXY, NODE_EXTRA_CA_CERTS, NPM_CONFIG_REGISTRY, etc.)", async () => {
+    const runner = createSbxRunner({
+      sbxBinary: STUB_PATH,
+      hostEnv: envBase({
+        HTTP_PROXY: "http://proxy.corp:8080",
+        https_proxy: "http://proxy.corp:8080",
+        NO_PROXY: "localhost,127.0.0.1",
+        no_proxy: "localhost,127.0.0.1",
+        ALL_PROXY: "socks5://proxy.corp:1080",
+        all_proxy: "socks5://proxy.corp:1080",
+        NODE_EXTRA_CA_CERTS: "/etc/ssl/certs/corp-root.pem",
+        SSL_CERT_FILE: "/etc/ssl/certs/ca-bundle.crt",
+        SSL_CERT_DIR: "/etc/ssl/certs",
+        NPM_CONFIG_REGISTRY: "https://artifactory.corp/api/npm/npm-virtual",
+        LC_MESSAGES: "C.UTF-8",
+        LC_NUMERIC: "C",
+        LANGUAGE: "en_US:en",
+        COLORTERM: "truecolor",
+        FORCE_COLOR: "1",
+        NO_COLOR: "",
+      }),
+    });
+    await runner.execAgent({ name: "ap-test", command: ["claude"] });
+    const childEnv = readCalls()[0].env;
+    expect(childEnv.HTTP_PROXY).toBe("http://proxy.corp:8080");
+    expect(childEnv.https_proxy).toBe("http://proxy.corp:8080");
+    expect(childEnv.NO_PROXY).toBe("localhost,127.0.0.1");
+    expect(childEnv.no_proxy).toBe("localhost,127.0.0.1");
+    expect(childEnv.ALL_PROXY).toBe("socks5://proxy.corp:1080");
+    expect(childEnv.NODE_EXTRA_CA_CERTS).toBe("/etc/ssl/certs/corp-root.pem");
+    expect(childEnv.SSL_CERT_FILE).toBe("/etc/ssl/certs/ca-bundle.crt");
+    expect(childEnv.SSL_CERT_DIR).toBe("/etc/ssl/certs");
+    expect(childEnv.NPM_CONFIG_REGISTRY).toBe("https://artifactory.corp/api/npm/npm-virtual");
+    expect(childEnv.LC_MESSAGES).toBe("C.UTF-8");
+    expect(childEnv.LC_NUMERIC).toBe("C");
+    expect(childEnv.LANGUAGE).toBe("en_US:en");
+    expect(childEnv.COLORTERM).toBe("truecolor");
+    expect(childEnv.FORCE_COLOR).toBe("1");
+  });
+
+  it("does NOT forward cred-or-host-path vars (SSH_AUTH_SOCK, AWS_*, EDITOR, JAVA_HOME)", async () => {
+    const runner = createSbxRunner({
+      sbxBinary: STUB_PATH,
+      hostEnv: envBase({
+        SSH_AUTH_SOCK: "/tmp/should-not-leak",
+        AWS_ACCESS_KEY_ID: "AKIAhould-not-leak",
+        AWS_SESSION_TOKEN: "not-this-either",
+        GIT_SSH_COMMAND: "ssh -o ...",
+        EDITOR: "vim",
+        JAVA_HOME: "/Library/Java/Home",
+        PYTHONPATH: "/some/host/path",
+      }),
+    });
+    await runner.execAgent({ name: "ap-test", command: ["claude"] });
+    const childEnv = readCalls()[0].env;
+    expect(childEnv.SSH_AUTH_SOCK).toBeUndefined();
+    expect(childEnv.AWS_ACCESS_KEY_ID).toBeUndefined();
+    expect(childEnv.AWS_SESSION_TOKEN).toBeUndefined();
+    expect(childEnv.GIT_SSH_COMMAND).toBeUndefined();
+    expect(childEnv.EDITOR).toBeUndefined();
+    expect(childEnv.JAVA_HOME).toBeUndefined();
+    expect(childEnv.PYTHONPATH).toBeUndefined();
+  });
+
+  it("emits a debug log of dropped non-default keys so operators can diagnose silent drops", async () => {
+    const runner = createSbxRunner({
+      sbxBinary: STUB_PATH,
+      hostEnv: envBase({
+        EDITOR: "vim",
+        MYSTERIOUS_VAR: "value",
+      }),
+    });
+    await runner.execAgent({ name: "ap-test", command: ["claude"] });
+    const debugBlob = JSON.stringify(mockLogger.debug.mock.calls);
+    expect(debugBlob).toMatch(/EDITOR/);
+    expect(debugBlob).toMatch(/MYSTERIOUS_VAR/);
+    // Values are NEVER in the log (key names only) — locks the no-value-leak invariant.
+    expect(debugBlob).not.toContain("vim");
+    expect(debugBlob).not.toContain("value");
+  });
+
   it("execAgent STRIPS MCP_CONTROL_TOKEN and AP_TOKEN_* from child env (token-theft defence)", async () => {
     const runner = createSbxRunner({
       sbxBinary: STUB_PATH,

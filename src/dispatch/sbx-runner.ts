@@ -5,20 +5,50 @@ import { childLogger } from "../logger.js";
 const log = childLogger("sbx-runner");
 
 // Positive env allow-list. Defence-in-depth: even if a future sbx forwards
-// parent env, MCP_CONTROL_TOKEN must not be in this set.
+// parent env, MCP_CONTROL_TOKEN must not be in this set. Groups documented
+// in docs/security.md so future additions stay scoped.
 const ALLOWED_ENV_KEYS = new Set([
+  // Process basics
   "PATH",
   "HOME",
   "USER",
-  "LANG",
-  "LC_ALL",
-  "LC_CTYPE",
-  "TERM",
+  "SHELL",
   "TMPDIR",
   "TZ",
-  "SHELL",
+  // Locale (full LC_* set so non-en_US operators don't see malformed output)
+  "LANG",
+  "LANGUAGE",
+  "LC_ALL",
+  "LC_CTYPE",
+  "LC_MESSAGES",
+  "LC_NUMERIC",
+  "LC_TIME",
+  "LC_COLLATE",
+  // Terminal / color signaling
+  "TERM",
+  "COLORTERM",
+  "FORCE_COLOR",
+  "NO_COLOR",
+  "CLICOLOR",
+  // Corporate-network HTTP proxy (both cases — Node prefers uppercase;
+  // curl/git/most C tools read lowercase first). Without these, anything
+  // inside the sandbox doing outbound HTTP fails on corporate networks.
+  "HTTP_PROXY",
+  "HTTPS_PROXY",
+  "NO_PROXY",
+  "ALL_PROXY",
+  "http_proxy",
+  "https_proxy",
+  "no_proxy",
+  "all_proxy",
+  // Corporate TLS roots (self-signed CAs)
+  "NODE_EXTRA_CA_CERTS",
+  "SSL_CERT_FILE",
+  "SSL_CERT_DIR",
+  // Node tooling
   "NODE_OPTIONS",
   "NPM_CONFIG_PREFIX",
+  "NPM_CONFIG_REGISTRY",
   "NVM_DIR",
 ]);
 
@@ -28,17 +58,35 @@ const ALLOWED_ENV_PREFIXES = ["SBX_STUB_"];
 // Belt-and-braces: drop credential-looking names even if accidentally allow-listed.
 const FORBIDDEN_ENV_PREFIXES = ["MCP_CONTROL", "AP_TOKEN"];
 
-function filterEnv(host: Readonly<Record<string, string | undefined>>): Record<string, string> {
+function filterEnv(host: Readonly<Record<string, string | undefined>>): {
+  out: Record<string, string>;
+  dropped: string[];
+} {
   const out: Record<string, string> = {};
+  const dropped: string[] = [];
   for (const [k, v] of Object.entries(host)) {
     if (v === undefined) continue;
-    if (FORBIDDEN_ENV_PREFIXES.some((p) => k.startsWith(p))) continue;
+    if (FORBIDDEN_ENV_PREFIXES.some((p) => k.startsWith(p))) {
+      dropped.push(k);
+      continue;
+    }
     const allowed =
       ALLOWED_ENV_KEYS.has(k) || ALLOWED_ENV_PREFIXES.some((p) => k.startsWith(p));
-    if (!allowed) continue;
+    if (!allowed) {
+      dropped.push(k);
+      continue;
+    }
     out[k] = v;
   }
-  return out;
+  return { out, dropped };
+}
+
+// Log dropped names at debug level so operators running `LOG_LEVEL=debug`
+// can diagnose "sandbox can't reach corporate proxy" without us logging the
+// values themselves (only key names).
+function emitDropDebug(label: string, dropped: readonly string[]): void {
+  if (dropped.length === 0) return;
+  log.debug({ label, droppedCount: dropped.length, dropped }, "filtered env keys not forwarded to sbx child");
 }
 
 interface SpawnResult {
@@ -164,7 +212,8 @@ export function createSbxRunner(opts: SbxRunnerOptions = {}): SbxRunner {
   return {
     async createSandbox({ name, workspace, extraArgs = [] }) {
       const args = ["create", "--name", name, "shell", workspace, ...extraArgs];
-      const env = filterEnv(hostEnv);
+      const { out: env, dropped } = filterEnv(hostEnv);
+      emitDropDebug("create", dropped);
       const result = await runSbx(binary, args, env);
       if (result.exitCode !== 0) {
         throw new SbxCommandError("create", result.exitCode, result.stderr);
@@ -174,7 +223,8 @@ export function createSbxRunner(opts: SbxRunnerOptions = {}): SbxRunner {
     async allowNetwork(port) {
       const spec = `host.docker.internal:${port},localhost:${port}`;
       const args = ["policy", "allow", "network", spec];
-      const env = filterEnv(hostEnv);
+      const { out: env, dropped } = filterEnv(hostEnv);
+      emitDropDebug("allowNetwork", dropped);
       const result = await runSbx(binary, args, env);
       if (result.exitCode !== 0) {
         throw new SbxCommandError("policy allow network", result.exitCode, result.stderr);
@@ -194,7 +244,8 @@ export function createSbxRunner(opts: SbxRunnerOptions = {}): SbxRunner {
 
     async execAgent({ name, command, signal }) {
       const args = ["exec", name, ...command];
-      const env = filterEnv(hostEnv);
+      const { out: env, dropped } = filterEnv(hostEnv);
+      emitDropDebug("execAgent", dropped);
       // Inherit stdio in production so the operator sees the agent in real
       // time. Tests inject SBX_STUB_CALLS via hostEnv to flip to captured
       // pipes (the stub writes via fs.appendFileSync, so stdio isn't needed).
@@ -204,7 +255,8 @@ export function createSbxRunner(opts: SbxRunnerOptions = {}): SbxRunner {
     },
 
     async tearDown({ name, policyIds }) {
-      const env = filterEnv(hostEnv);
+      const { out: env, dropped } = filterEnv(hostEnv);
+      emitDropDebug("tearDown", dropped);
       const failures: TearDownFailure[] = [];
       // Best-effort — one step failing must not mask the others.
       const safe = async (

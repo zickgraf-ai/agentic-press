@@ -127,7 +127,17 @@ Tier 1.3 (#56) introduces a **second HTTP listener** alongside the proxy: the co
 
 **How the dispatch CLI enforces the contracts above:**
 
-- [**Token theft**](#token-theft): `src/dispatch/sbx-runner.ts` builds the `sbx exec` child environment from a **positive allow-list** (`PATH`, `HOME`, common shell/locale vars). The `SBX_STUB_*` prefix is also allow-listed but is test-plumbing only — production sbx invocations never read such names. `MCP_CONTROL_TOKEN` is not in the allow-list and is additionally blocked by a `FORBIDDEN_ENV_PREFIXES` belt-and-braces check (the forbidden check runs first, so adding a key to the allow-list cannot accidentally re-enable a credential prefix). The dispatch CLI logs through the standard pino tree; the token is held in a closure inside `createControlPlaneClient` and never appears in error messages or logged objects (locked by `tests/dispatch/control-plane-client.test.ts`).
+- [**Token theft**](#token-theft): `src/dispatch/sbx-runner.ts` builds the `sbx exec` child environment from a **positive allow-list** scoped to a few well-defined categories:
+  - Process basics (`PATH`, `HOME`, `USER`, `SHELL`, `TMPDIR`, `TZ`)
+  - Locale (`LANG`, `LANGUAGE`, full `LC_*` set)
+  - Terminal / color (`TERM`, `COLORTERM`, `FORCE_COLOR`, `NO_COLOR`, `CLICOLOR`)
+  - Corporate-network proxy (`HTTP_PROXY` / `HTTPS_PROXY` / `NO_PROXY` / `ALL_PROXY`, both cases)
+  - Corporate TLS roots (`NODE_EXTRA_CA_CERTS`, `SSL_CERT_FILE`, `SSL_CERT_DIR`)
+  - Node tooling (`NODE_OPTIONS`, `NPM_CONFIG_PREFIX`, `NPM_CONFIG_REGISTRY`, `NVM_DIR`)
+
+  The `SBX_STUB_*` prefix is allow-listed but is test-plumbing only — production sbx invocations never read such names. `MCP_CONTROL_TOKEN` is not in any allowed category and is additionally blocked by `FORBIDDEN_ENV_PREFIXES` (which runs first, so adding a key to the allow-list cannot re-enable a credential prefix). Explicitly NOT forwarded: `SSH_AUTH_SOCK`, `GIT_SSH_COMMAND`, `AWS_*` / `GCP_*` / `AZURE_*` cloud creds, `EDITOR` / `PAGER`, and host-path env (`JAVA_HOME`, `GOPATH`, `PYTHONPATH`). At `LOG_LEVEL=debug` the dispatch CLI logs the names (not values) of dropped keys so operators can diagnose "sandbox can't reach corporate proxy" without grep-ing source.
+
+  The dispatch CLI logs through the standard pino tree; the bearer token is held in a closure inside `createControlPlaneClient` and never appears in error messages or logged objects (locked by `tests/dispatch/control-plane-client.test.ts`).
 - [**Identity spoofing**](#identity-spoofing): session IDs are minted in `src/orchestrator/session-id.ts` as `crypto.randomBytes(16).toString("hex")` — 128 bits of entropy, 32 hex chars. The output matches `validateSessionInput`'s charset and length envelope (verified by `tests/orchestrator/session-id.test.ts`).
 - [**Confused deputy**](#confused-deputy): the `POST /sessions` payload is constructed only from the manifest file passed on argv. The dispatch CLI writes `.mcp.json` into the workspace and reads it back **only** for idempotency comparison — never as configuration input that could shape registration, allowlist contents, or any other registry mutation. No sandbox is running when the manifest is parsed and registered.
 
