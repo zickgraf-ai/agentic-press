@@ -114,6 +114,10 @@ const PROVENANCE_MARKER = "## Provenance";
  * Scan `.claude/skills/` for vendored skills — those whose SKILL.md carries
  * the provenance footer marker. Project-authored skills (without the marker)
  * are excluded so the trial's metrics stay scoped to the cherry-picked set.
+ *
+ * An fs error on a single skill (EACCES, EISDIR, ENOENT on a stale symlink,
+ * etc.) emits a `[readVendoredSkills]` warning and skips that skill —
+ * other readable skills are still returned, and the sweep continues.
  */
 export function readVendoredSkills(skillsDir: string): VendoredSkill[] {
   if (!existsSync(skillsDir)) return [];
@@ -124,9 +128,7 @@ export function readVendoredSkills(skillsDir: string): VendoredSkill[] {
     try {
       isDir = statSync(skillDir).isDirectory();
     } catch (err) {
-      console.warn(
-        `[readVendoredSkills] skipped ${name}: ${(err as Error).message}`
-      );
+      warnSkipped(name, err);
       continue;
     }
     if (!isDir) continue;
@@ -138,15 +140,25 @@ export function readVendoredSkills(skillsDir: string): VendoredSkill[] {
       content = readFileSync(skillMd, "utf8");
       mtime = statSync(skillMd).mtime;
     } catch (err) {
-      console.warn(
-        `[readVendoredSkills] skipped ${name}: ${(err as Error).message}`
-      );
+      warnSkipped(name, err);
       continue;
     }
     if (!content.includes(PROVENANCE_MARKER)) continue;
     out.push({ name, skillMdPath: skillMd, skillMdMtime: mtime });
   }
   return out.sort((a, b) => a.name.localeCompare(b.name));
+}
+
+function warnSkipped(name: string, err: unknown): void {
+  // Mirrors the catch-narrowing convention used in `src/mcp-proxy/logger.ts`
+  // (`err instanceof Error ? err.message : String(err)`). The `.code` prefix
+  // surfaces NodeJS.ErrnoException codes (EACCES vs ENOENT vs EMFILE) so the
+  // launchd sweep log gives operators a triage signal, not just prose.
+  const code = (err as NodeJS.ErrnoException | undefined)?.code;
+  const message = err instanceof Error ? err.message : String(err);
+  console.warn(
+    `[readVendoredSkills] skipped ${name}: ${code ?? "UNKNOWN"} ${message}`
+  );
 }
 
 export function computeMetrics(
