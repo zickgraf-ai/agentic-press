@@ -436,11 +436,50 @@ describe("readVendoredSkills", () => {
     mkdirSync(join(skillsRoot, "wedged"), { recursive: true });
     mkdirSync(join(skillsRoot, "wedged", "SKILL.md"));
 
+    const skipped: Array<{ name: string; code: string | undefined }> = [];
     const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
     try {
-      readVendoredSkills(skillsRoot, { onSkip: () => {} });
+      readVendoredSkills(skillsRoot, {
+        onSkip: (name, err) => {
+          skipped.push({ name, code: (err as NodeJS.ErrnoException).code });
+        },
+      });
       expect(warnSpy).toHaveBeenCalledTimes(1);
       expect(String(warnSpy.mock.calls[0]![0])).toContain("[readVendoredSkills]");
+      // Pin the readFileSync-catch callback payload (parallel to the
+      // statSync-catch test above which pins ENOENT). Without this a
+      // future refactor calling `options.onSkip?.(name)` at one of the
+      // two catches — dropping the second arg — would slip through.
+      expect(skipped).toEqual([{ name: "wedged", code: "EISDIR" }]);
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("does not abort the scan when options.onSkip throws — readable siblings still come back", () => {
+    const skillsRoot = join(tmpRoot, ".claude", "skills");
+    mkdirSync(join(skillsRoot, "readable"), { recursive: true });
+    writeFileSync(
+      join(skillsRoot, "readable", "SKILL.md"),
+      "---\nname: readable\n---\n\n## Provenance\n\nVendored.\n"
+    );
+    symlinkSync(join(tmpRoot, "nope"), join(skillsRoot, "broken"));
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const skills = readVendoredSkills(skillsRoot, {
+        onSkip: () => {
+          throw new Error("observer is buggy");
+        },
+      });
+      // Invariant under test: a throwing observer must not undo the
+      // swallow-and-continue behavior that the per-skill warn protects.
+      expect(skills.map((s) => s.name)).toEqual(["readable"]);
+      // Two warns now: the original `[readVendoredSkills] skipped …` AND
+      // the `onSkip callback threw …` line.
+      expect(warnSpy).toHaveBeenCalledTimes(2);
+      const messages = warnSpy.mock.calls.map((c) => String(c[0]));
+      expect(messages.some((m) => m.includes("onSkip callback threw"))).toBe(true);
     } finally {
       warnSpy.mockRestore();
     }

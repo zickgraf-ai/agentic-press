@@ -181,9 +181,10 @@ if (!opts.skipSkillMetrics) {
       );
       if (skippedSkillsCount > 0) {
         // Echo the skip count to stdout so a casual sweep log scan flags it
-        // alongside the markdown header (#66). The per-skill detail is already
-        // in the [readVendoredSkills] warn lines higher in the same log.
-        console.log(`[sweep:skill] ${skippedSkillsCount} skill(s) skipped due to fs errors — see warnings above`);
+        // alongside the markdown header. The per-skill detail is already in
+        // the [readVendoredSkills] warn lines higher in the same log.
+        const pluralized = skippedSkillsCount === 1 ? "skill" : "skills";
+        console.log(`[sweep:skill] ${skippedSkillsCount} ${pluralized} skipped due to fs errors — see warnings above`);
       }
 
       // Run anti-signal detector.

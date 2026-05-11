@@ -53,13 +53,11 @@ export interface SkillUsageMetrics {
   /** Optional — surfaced from collectInvocations so the report flags transcript drift. */
   readonly parseStats?: ParseStats;
   /**
-   * Count of vendored skill directories `readVendoredSkills` had to skip due
-   * to an fs error. Surfaced in the report header (next to
-   * `parseStats.malformedLines`) so the reader can't miss it — a non-zero
-   * value means `[readVendoredSkills]` warnings were emitted to the sweep
-   * log and the metrics may understate trial activity. See issue #66.
+   * Count of vendored skill directories that `readVendoredSkills` could not
+   * read. A non-zero value means `[readVendoredSkills]` warnings were
+   * emitted to the sweep log and trial activity counts may be understated.
    */
-  readonly skippedSkillsCount?: number;
+  readonly skippedSkillsCount: number;
 }
 
 interface VerdictRule {
@@ -121,8 +119,10 @@ const PROVENANCE_MARKER = "## Provenance";
 export interface ReadVendoredSkillsOptions {
   /**
    * Invoked once per directory entry that was skipped due to an fs error
-   * (in addition to the `[readVendoredSkills]` console.warn). Lets callers
-   * tally skipped skills for surfacing in the report header — see #66.
+   * (in addition to the `[readVendoredSkills]` console.warn). Callers can
+   * tally these to surface a count to operators. Exceptions thrown from
+   * this callback are caught and logged — they will not abort the scan
+   * or lose readable siblings.
    */
   readonly onSkip?: (name: string, err: unknown) => void;
 }
@@ -150,7 +150,7 @@ export function readVendoredSkills(
       isDir = statSync(skillDir).isDirectory();
     } catch (err) {
       warnSkipped(name, err);
-      options.onSkip?.(name, err);
+      notifySkip(options.onSkip, name, err);
       continue;
     }
     if (!isDir) continue;
@@ -163,7 +163,7 @@ export function readVendoredSkills(
       mtime = statSync(skillMd).mtime;
     } catch (err) {
       warnSkipped(name, err);
-      options.onSkip?.(name, err);
+      notifySkip(options.onSkip, name, err);
       continue;
     }
     if (!content.includes(PROVENANCE_MARKER)) continue;
@@ -184,6 +184,26 @@ function warnSkipped(name: string, err: unknown): void {
   );
 }
 
+function notifySkip(
+  callback: ReadVendoredSkillsOptions["onSkip"],
+  name: string,
+  err: unknown
+): void {
+  if (!callback) return;
+  // An observer callback must not break the scan loop — a buggy counter or
+  // a thrown logger here would drop readable siblings, undoing the
+  // swallow-and-continue invariant that's the whole point of warnSkipped.
+  try {
+    callback(name, err);
+  } catch (callbackErr) {
+    const code = (callbackErr as NodeJS.ErrnoException | undefined)?.code;
+    const message = callbackErr instanceof Error ? callbackErr.message : String(callbackErr);
+    console.warn(
+      `[readVendoredSkills] onSkip callback threw on ${name}: ${code ?? "UNKNOWN"} ${message}`
+    );
+  }
+}
+
 export function computeMetrics(
   invocations: readonly ClassifiedInvocation[],
   skills: readonly VendoredSkill[],
@@ -191,7 +211,7 @@ export function computeMetrics(
   windowEnd: string,
   now: Date = new Date(),
   parseStats?: ParseStats,
-  skippedSkillsCount?: number
+  skippedSkillsCount: number = 0
 ): SkillUsageMetrics {
   const trialSkillNames = new Set(skills.map((s) => s.name));
   const trialInvocationList = invocations.filter((i) => trialSkillNames.has(i.skillName));
@@ -303,7 +323,7 @@ export function renderReport(metrics: SkillUsageMetrics): string {
         : `${ps.totalLines} lines, ${ps.malformedLines} malformed ⚠️ — investigate transcript-format drift`;
     lines.push(`**Transcripts scanned:** ${ps.filesScanned} (${malformedNote})`);
   }
-  if (metrics.skippedSkillsCount !== undefined && metrics.skippedSkillsCount > 0) {
+  if (metrics.skippedSkillsCount > 0) {
     lines.push(
       `**Skipped skills:** ${metrics.skippedSkillsCount} ⚠️ — see \`[readVendoredSkills]\` diagnostics in the launchd sweep log (\`~/Library/Logs/agentic-press-skill-metrics.log\`); trial counts below may be understated.`
     );
