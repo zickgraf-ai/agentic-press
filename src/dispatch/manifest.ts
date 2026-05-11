@@ -17,6 +17,16 @@ export interface AgentManifest {
   readonly agents: readonly AgentManifestEntry[];
 }
 
+// Share the control-plane's validator so a parsed manifest cannot 400 at register time.
+function validateAgentTypeAndAllowedTools(
+  agentType: unknown,
+  allowedTools: unknown
+): { ok: true } | { ok: false; error: string } {
+  // Pass a placeholder sessionId; this helper only consults the agentType +
+  // allowedTools branches. The real sessionId isn't known until mint time.
+  return validateSessionInput({ sessionId: "placeholder", agentType, allowedTools });
+}
+
 export function parseManifestFile(path: string): AgentManifest {
   let raw: string;
   try {
@@ -53,6 +63,29 @@ export function parseManifestFile(path: string): AgentManifest {
   return { agents };
 }
 
+export function validateWorkspace(path: unknown, where: string): string {
+  if (typeof path !== "string" || path.length === 0) {
+    throw new Error(`${where} must be a non-empty string`);
+  }
+  if (!isAbsolute(path)) {
+    throw new Error(`${where} must be an absolute path, got "${path}"`);
+  }
+  let stat;
+  try {
+    stat = statSync(path);
+  } catch (err) {
+    const code = err instanceof Error ? (err as { code?: unknown }).code : undefined;
+    if (code === "ENOENT") {
+      throw new Error(`${where} does not exist: "${path}"`);
+    }
+    throw new Error(`${where} cannot be accessed (${code ?? "unknown"}): "${path}"`);
+  }
+  if (!stat.isDirectory()) {
+    throw new Error(`${where} must be a directory, "${path}" is not`);
+  }
+  return path;
+}
+
 export function validateAgentEntry(raw: unknown, index: number): AgentManifestEntry {
   const where = `agents[${index}]`;
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
@@ -60,22 +93,13 @@ export function validateAgentEntry(raw: unknown, index: number): AgentManifestEn
   }
   const entry = raw as Record<string, unknown>;
 
-  // Re-use the control-plane's validation contract for agentType + allowedTools
-  // so a manifest that parses always produces a payload that won't 400.
-  // sessionId is a stand-in here — the registry contract validates it the same
-  // way as agentType, and we don't know the real sessionId until mint time.
-  const sharedCheck = validateSessionInput({
-    sessionId: "placeholder",
-    agentType: entry.agentType,
-    allowedTools: entry.allowedTools,
-  });
+  const sharedCheck = validateAgentTypeAndAllowedTools(entry.agentType, entry.allowedTools);
   if (!sharedCheck.ok) {
     throw new Error(`${where}: ${sharedCheck.error}`);
   }
   const agentType = entry.agentType as string;
   const allowedTools = (entry.allowedTools as unknown[]).map((t) => t as string);
 
-  // agentCommand
   if (!Array.isArray(entry.agentCommand)) {
     throw new Error(`${where}.agentCommand must be a non-empty array of strings`);
   }
@@ -92,25 +116,8 @@ export function validateAgentEntry(raw: unknown, index: number): AgentManifestEn
   }
   const agentCommand = entry.agentCommand.map((s) => s as string);
 
-  // workspace
-  if (typeof entry.workspace !== "string" || entry.workspace.length === 0) {
-    throw new Error(`${where}.workspace must be a non-empty string`);
-  }
-  if (!isAbsolute(entry.workspace)) {
-    throw new Error(`${where}.workspace must be an absolute path, got "${entry.workspace}"`);
-  }
-  let stat;
-  try {
-    stat = statSync(entry.workspace);
-  } catch {
-    throw new Error(`${where}.workspace does not exist: "${entry.workspace}"`);
-  }
-  if (!stat.isDirectory()) {
-    throw new Error(`${where}.workspace must be a directory, "${entry.workspace}" is not`);
-  }
-  const workspace = entry.workspace;
+  const workspace = validateWorkspace(entry.workspace, `${where}.workspace`);
 
-  // sandboxName (optional)
   let sandboxName: string | undefined;
   if (entry.sandboxName !== undefined) {
     if (typeof entry.sandboxName !== "string" || !SANDBOX_NAME_PATTERN.test(entry.sandboxName)) {
@@ -121,7 +128,6 @@ export function validateAgentEntry(raw: unknown, index: number): AgentManifestEn
     sandboxName = entry.sandboxName;
   }
 
-  // extraSbxArgs (optional)
   let extraSbxArgs: string[] | undefined;
   if (entry.extraSbxArgs !== undefined) {
     if (!Array.isArray(entry.extraSbxArgs)) {

@@ -4,14 +4,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createSbxRunner } from "../../src/dispatch/sbx-runner.js";
 
-/**
- * Tier 1.4 — sbx-runner tests.
- *
- * Security-critical invariant locked here: `execAgent` MUST NOT propagate
- * MCP_CONTROL_TOKEN (or any AP_TOKEN-prefixed var) into the sbx child process
- * environment. Defense-in-depth on top of sbx's own env isolation.
- */
-
 let TMP_ROOT: string;
 let STUB_BIN_DIR: string;
 let STUB_PATH: string;
@@ -24,11 +16,6 @@ beforeAll(() => {
   STUB_PATH = join(STUB_BIN_DIR, "sbx");
   CALLS_FILE = join(TMP_ROOT, "calls.ndjson");
 
-  // Stub sbx that:
-  //  - emits a JSON line per invocation containing argv and full env
-  //  - returns the value of $SBX_STUB_EXIT (default 0)
-  //  - if first arg is "policy" and second "allow", prints fake UUIDs so
-  //    allowNetwork's regex can extract them
   const stub = `#!/bin/bash
 node -e '
 const fs = require("fs");
@@ -37,6 +24,12 @@ fs.appendFileSync(process.env.SBX_STUB_CALLS, JSON.stringify({ argv: process.arg
 if [[ "$1" == "policy" && "$2" == "allow" ]]; then
   echo "Allowed network policy 11111111-2222-3333-4444-555555555555"
   echo "Allowed network policy aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+fi
+if [[ -n "$SBX_STUB_FAIL_TEARDOWN" ]]; then
+  if [[ "$1" == "stop" || "$1" == "rm" || ( "$1" == "policy" && "$2" == "rm" ) ]]; then
+    echo "stubbed teardown failure" >&2
+    exit 99
+  fi
 fi
 exit "\${SBX_STUB_EXIT:-0}"
 `;
@@ -116,7 +109,7 @@ describe("sbx-runner", () => {
     expect(exitCode).toBe(42);
   });
 
-  it("execAgent STRIPS MCP_CONTROL_TOKEN and AP_TOKEN_* from child env (threat row 3)", async () => {
+  it("execAgent STRIPS MCP_CONTROL_TOKEN and AP_TOKEN_* from child env (token-theft defence)", async () => {
     const runner = createSbxRunner({
       sbxBinary: STUB_PATH,
       hostEnv: envBase({
@@ -136,9 +129,9 @@ describe("sbx-runner", () => {
     expect(envBlob).not.toContain("also-should-never-reach-abcdef");
   });
 
-  it("tearDown calls sbx stop, sbx rm, and sbx policy rm for each policy ID; tolerates errors", async () => {
+  it("tearDown calls sbx stop, sbx rm, and sbx policy rm for each policy ID; success returns empty failures", async () => {
     const runner = createSbxRunner({ sbxBinary: STUB_PATH, hostEnv: envBase() });
-    await runner.tearDown({
+    const result = await runner.tearDown({
       name: "ap-test",
       policyIds: ["11111111-2222-3333-4444-555555555555", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"],
     });
@@ -147,5 +140,28 @@ describe("sbx-runner", () => {
     expect(subcommands).toContain("stop ap-test");
     expect(subcommands).toContain("rm ap-test");
     expect(subcommands.some((s) => s.startsWith("policy rm"))).toBe(true);
+    expect(result.failures).toEqual([]);
+  });
+
+  it("tearDown collects per-step failures with name + policyId so a leak is observable", async () => {
+    const runner = createSbxRunner({
+      sbxBinary: STUB_PATH,
+      hostEnv: envBase({ SBX_STUB_FAIL_TEARDOWN: "1" }),
+    });
+    const result = await runner.tearDown({
+      name: "ap-leak",
+      policyIds: ["aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"],
+    });
+    expect(result.failures.length).toBe(3); // stop + rm + 1 policy rm
+    const labels = result.failures.map((f) => f.label);
+    expect(labels).toContain("stop");
+    expect(labels).toContain("rm");
+    expect(labels).toContain("policy rm");
+    for (const f of result.failures) {
+      expect(f.name).toBe("ap-leak");
+      expect(f.message).toMatch(/teardown failure|exit 99/);
+    }
+    const policyFailure = result.failures.find((f) => f.label === "policy rm");
+    expect(policyFailure?.policyId).toBe("aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee");
   });
 });

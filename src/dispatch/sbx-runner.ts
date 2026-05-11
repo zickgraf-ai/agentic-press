@@ -1,12 +1,10 @@
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { childLogger } from "../logger.js";
 
 const log = childLogger("sbx-runner");
 
-// Positive env allow-list. Only these names plus operator-declared safe vars
-// reach the `sbx` child process. Defense-in-depth on top of sbx's own env
-// isolation: the host-side MCP_CONTROL_TOKEN must never leak even if a future
-// sbx version forwards parent env into the container.
+// Positive env allow-list. Defence-in-depth: even if a future sbx forwards
+// parent env, MCP_CONTROL_TOKEN must not be in this set.
 const ALLOWED_ENV_KEYS = new Set([
   "PATH",
   "HOME",
@@ -18,19 +16,15 @@ const ALLOWED_ENV_KEYS = new Set([
   "TMPDIR",
   "TZ",
   "SHELL",
-  // Common Node tooling
   "NODE_OPTIONS",
   "NPM_CONFIG_PREFIX",
   "NVM_DIR",
 ]);
 
-// Test-stub plumbing: any var prefixed with SBX_STUB_ is forwarded. These
-// names exist only in the test harness's stub script — production sbx invocations
-// don't use them. Cheaper than dependency-injecting the env into every test.
+// SBX_STUB_* forwarded for test plumbing — cheaper than DI'ing env per test.
 const ALLOWED_ENV_PREFIXES = ["SBX_STUB_"];
 
-// Belt-and-braces: explicitly drop any key that looks like a sensitive credential
-// even if (somehow) it got added to the allow-list.
+// Belt-and-braces: drop credential-looking names even if accidentally allow-listed.
 const FORBIDDEN_ENV_PREFIXES = ["MCP_CONTROL", "AP_TOKEN"];
 
 function filterEnv(host: Readonly<Record<string, string | undefined>>): Record<string, string> {
@@ -56,13 +50,14 @@ function runSbx(
   binary: string,
   args: readonly string[],
   env: Record<string, string>,
-  options: { inheritStdio?: boolean } = {}
+  options: { inheritStdio?: boolean; signal?: AbortSignal; onChild?: (c: ChildProcess) => void } = {}
 ): Promise<SpawnResult> {
   return new Promise((resolve, reject) => {
     const child = spawn(binary, args, {
       env,
       stdio: options.inheritStdio ? "inherit" : ["ignore", "pipe", "pipe"],
     });
+    options.onChild?.(child);
     let stdout = "";
     let stderr = "";
     if (!options.inheritStdio) {
@@ -73,8 +68,19 @@ function runSbx(
         stderr += d.toString("utf8");
       });
     }
-    child.on("error", (err) => reject(err));
+    const onAbort = () => {
+      if (!child.killed) child.kill("SIGTERM");
+    };
+    if (options.signal) {
+      if (options.signal.aborted) onAbort();
+      else options.signal.addEventListener("abort", onAbort, { once: true });
+    }
+    child.on("error", (err) => {
+      options.signal?.removeEventListener("abort", onAbort);
+      reject(err);
+    });
     child.on("exit", (code) => {
+      options.signal?.removeEventListener("abort", onAbort);
       resolve({ exitCode: code ?? -1, stdout, stderr });
     });
   });
@@ -93,6 +99,7 @@ export interface AllowNetworkResult {
 export interface ExecAgentOptions {
   readonly name: string;
   readonly command: readonly string[];
+  readonly signal?: AbortSignal;
 }
 
 export interface ExecAgentResult {
@@ -104,11 +111,22 @@ export interface TearDownOptions {
   readonly policyIds: readonly string[];
 }
 
+export interface TearDownFailure {
+  readonly label: "stop" | "rm" | "policy rm";
+  readonly name: string;
+  readonly policyId?: string;
+  readonly message: string;
+}
+
+export interface TearDownResult {
+  readonly failures: readonly TearDownFailure[];
+}
+
 export interface SbxRunner {
   createSandbox(opts: CreateSandboxOptions): Promise<void>;
   allowNetwork(port: number): Promise<AllowNetworkResult>;
   execAgent(opts: ExecAgentOptions): Promise<ExecAgentResult>;
-  tearDown(opts: TearDownOptions): Promise<void>;
+  tearDown(opts: TearDownOptions): Promise<TearDownResult>;
 }
 
 export interface SbxRunnerOptions {
@@ -153,36 +171,46 @@ export function createSbxRunner(opts: SbxRunnerOptions = {}): SbxRunner {
       return { policyIds: matches };
     },
 
-    async execAgent({ name, command }) {
+    async execAgent({ name, command, signal }) {
       const args = ["exec", name, ...command];
       const env = filterEnv(hostEnv);
-      // Inherit stdio so the operator sees what the agent says in real time.
-      // Tests use the stub which writes via fs.appendFileSync — stdio is not
-      // consulted by the stub for capturing call info.
+      // Inherit stdio in production so the operator sees what the agent says
+      // in real time. Tests use the stub which writes via fs.appendFileSync.
       const inheritStdio = !process.env.SBX_STUB_CALLS;
-      const result = await runSbx(binary, args, env, { inheritStdio });
+      const result = await runSbx(binary, args, env, { inheritStdio, signal });
       return { exitCode: result.exitCode };
     },
 
     async tearDown({ name, policyIds }) {
       const env = filterEnv(hostEnv);
-      // Each tear-down step is best-effort: log on failure but never throw,
-      // so a single failure doesn't mask the others.
-      const safe = async (label: string, args: string[]) => {
+      const failures: TearDownFailure[] = [];
+      // Best-effort — one step failing must not mask the others.
+      const safe = async (
+        label: "stop" | "rm" | "policy rm",
+        args: string[],
+        policyId?: string
+      ) => {
+        let message: string | undefined;
         try {
           const r = await runSbx(binary, args, env);
           if (r.exitCode !== 0) {
-            log.warn({ label, exitCode: r.exitCode, stderr: r.stderr.trim() }, "tearDown step exited non-zero");
+            message = r.stderr.trim() || `exit ${r.exitCode}`;
           }
         } catch (err) {
-          log.warn({ label, err: err instanceof Error ? err.message : String(err) }, "tearDown step threw");
+          message = err instanceof Error ? err.message : String(err);
+        }
+        if (message !== undefined) {
+          const failure: TearDownFailure = { label, name, ...(policyId ? { policyId } : {}), message };
+          failures.push(failure);
+          log.warn(failure, "tearDown step failed");
         }
       };
       await safe("stop", ["stop", name]);
       await safe("rm", ["rm", name]);
       for (const id of policyIds) {
-        await safe("policy rm", ["policy", "rm", "network", "--id", id]);
+        await safe("policy rm", ["policy", "rm", "network", "--id", id], id);
       }
+      return { failures };
     },
   };
 }

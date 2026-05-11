@@ -1,59 +1,56 @@
 import { childLogger } from "../logger.js";
+import type { SessionId } from "../orchestrator/session-id.js";
 
 const log = childLogger("dispatch-client");
 
 const DEFAULT_BASE_URL = "http://127.0.0.1:18924";
 const DEFAULT_RETRY_DELAYS_MS = [100, 400] as const;
+const DEFAULT_REQUEST_TIMEOUT_MS = 5_000;
 
-export class ControlPlaneAuthError extends Error {
-  constructor(message = "Control-plane rejected our bearer token (HTTP 401). Check MCP_CONTROL_TOKEN.") {
-    super(message);
-    this.name = "ControlPlaneAuthError";
+export type ControlPlaneFailure =
+  | { readonly kind: "auth" }
+  | { readonly kind: "validation"; readonly serverMessage: string }
+  | { readonly kind: "server"; readonly status: number; readonly attempts: number }
+  | { readonly kind: "connect"; readonly detail: string };
+
+function formatFailure(f: ControlPlaneFailure): string {
+  switch (f.kind) {
+    case "auth":
+      return "Control-plane rejected our bearer token (HTTP 401). Check MCP_CONTROL_TOKEN.";
+    case "validation":
+      return `Control-plane rejected the registration payload (HTTP 400): ${f.serverMessage}`;
+    case "server":
+      return `Control-plane returned HTTP ${f.status} after ${f.attempts} attempt(s). Is the proxy / control plane healthy?`;
+    case "connect":
+      return `Cannot reach the control plane (${f.detail}). Is the proxy running with MCP_CONTROL_TOKEN set?`;
   }
 }
 
-export class ControlPlaneValidationError extends Error {
-  constructor(serverMessage: string) {
-    super(`Control-plane rejected the registration payload (HTTP 400): ${serverMessage}`);
-    this.name = "ControlPlaneValidationError";
-  }
-}
-
-export class ControlPlaneServerError extends Error {
-  constructor(status: number, attempts: number) {
-    super(
-      `Control-plane returned HTTP ${status} after ${attempts} attempt(s). ` +
-        `Is the proxy / control plane healthy?`
-    );
-    this.name = "ControlPlaneServerError";
-  }
-}
-
-export class ControlPlaneConnectError extends Error {
-  constructor(detail: string) {
-    super(
-      `Cannot reach the control plane (${detail}). ` +
-        `Is the proxy running with MCP_CONTROL_TOKEN set?`
-    );
-    this.name = "ControlPlaneConnectError";
+export class ControlPlaneError extends Error {
+  public readonly failure: ControlPlaneFailure;
+  constructor(failure: ControlPlaneFailure) {
+    super(formatFailure(failure));
+    this.name = "ControlPlaneError";
+    this.failure = failure;
   }
 }
 
 export interface RegisterPayload {
-  readonly sessionId: string;
+  readonly sessionId: SessionId;
   readonly agentType: string;
   readonly allowedTools: readonly string[];
 }
 
 export interface ControlPlaneClient {
   register(payload: RegisterPayload): Promise<void>;
-  deregister(sessionId: string): Promise<void>;
+  deregister(sessionId: SessionId): Promise<void>;
 }
 
 export interface ControlPlaneClientOptions {
   readonly token: string;
   readonly baseUrl?: string;
   readonly retryDelaysMs?: readonly number[];
+  readonly requestTimeoutMs?: number;
 }
 
 const CONNECT_CODES = new Set(["ECONNREFUSED", "ENOTFOUND", "ECONNRESET", "EAI_AGAIN"]);
@@ -66,24 +63,36 @@ function extractCode(value: unknown): string | undefined {
   return undefined;
 }
 
-function isConnectionRefused(err: unknown): boolean {
-  if (!(err instanceof Error)) return false;
+// undici wraps connection failures as AggregateError under cause.errors[].
+function classifyFetchError(err: unknown): ControlPlaneFailure | undefined {
+  if (!(err instanceof Error)) return undefined;
   const direct = extractCode(err);
-  if (direct && CONNECT_CODES.has(direct)) return true;
+  if (direct && CONNECT_CODES.has(direct)) return { kind: "connect", detail: direct };
   const cause = (err as { cause?: unknown }).cause;
   const causeCode = extractCode(cause);
-  if (causeCode && CONNECT_CODES.has(causeCode)) return true;
-  // undici wraps connection failures as AggregateError under cause.errors[]
+  if (causeCode && CONNECT_CODES.has(causeCode)) return { kind: "connect", detail: causeCode };
   if (cause && typeof cause === "object" && "errors" in cause) {
     const inner = (cause as { errors?: unknown }).errors;
     if (Array.isArray(inner)) {
       for (const sub of inner) {
         const subCode = extractCode(sub);
-        if (subCode && CONNECT_CODES.has(subCode)) return true;
+        if (subCode && CONNECT_CODES.has(subCode)) return { kind: "connect", detail: subCode };
       }
     }
   }
-  return false;
+  // Last-resort fallback: undici raises TypeError for *all* network-layer
+  // failures. If we couldn't extract a code from any of the standard shapes,
+  // a bare "fetch failed" TypeError is overwhelmingly a connectivity issue
+  // and giving the operator the connect-error message is more useful than a
+  // generic "unexpected".
+  if (err.name === "TypeError" && /fetch failed/i.test(err.message)) {
+    return { kind: "connect", detail: "fetch failed (undici did not surface a code — check that the proxy is running)" };
+  }
+  return undefined;
+}
+
+function isAbortError(err: unknown): boolean {
+  return err instanceof Error && (err.name === "AbortError" || (err as { code?: unknown }).code === "ABORT_ERR");
 }
 
 function sleep(ms: number): Promise<void> {
@@ -93,9 +102,19 @@ function sleep(ms: number): Promise<void> {
 export function createControlPlaneClient(opts: ControlPlaneClientOptions): ControlPlaneClient {
   const baseUrl = (opts.baseUrl ?? DEFAULT_BASE_URL).replace(/\/$/, "");
   const retryDelays = opts.retryDelaysMs ?? DEFAULT_RETRY_DELAYS_MS;
-  // Token held in closure; never logged, never returned.
-  const token = opts.token;
-  const authHeader = `Bearer ${token}`;
+  const timeoutMs = opts.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+  // Closure-scoped — must never appear in logs or thrown errors.
+  const authHeader = `Bearer ${opts.token}`;
+
+  async function singleAttempt(input: RequestInfo, init: RequestInit): Promise<Response> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      return await fetch(input, { ...init, signal: controller.signal });
+    } finally {
+      clearTimeout(timer);
+    }
+  }
 
   async function callWithRetry(
     label: string,
@@ -108,19 +127,30 @@ export function createControlPlaneClient(opts: ControlPlaneClientOptions): Contr
       try {
         res = await fn();
       } catch (err) {
-        if (isConnectionRefused(err)) {
-          const code =
-            err instanceof Error && err.cause && typeof err.cause === "object" && "code" in err.cause
-              ? String((err.cause as { code?: unknown }).code)
-              : "network error";
-          throw new ControlPlaneConnectError(code);
+        if (isAbortError(err)) {
+          throw new ControlPlaneError({
+            kind: "connect",
+            detail: `request timed out after ${timeoutMs}ms`,
+          });
         }
-        // Unexpected fetch error — re-throw bare; caller logs without token.
-        log.warn({ label, attempt, errName: err instanceof Error ? err.name : "unknown" }, "control-plane request errored");
+        const classified = classifyFetchError(err);
+        if (classified) throw new ControlPlaneError(classified);
+        // Unexpected — log enriched details (no token) so a future undici drift
+        // is diagnosable from the log, then re-throw.
+        log.warn(
+          {
+            label,
+            attempt,
+            errName: err instanceof Error ? err.name : "unknown",
+            causeName: err instanceof Error && err.cause instanceof Error ? err.cause.name : undefined,
+            causeCode: extractCode(err instanceof Error ? err.cause : undefined),
+          },
+          "control-plane fetch errored — unclassified"
+        );
         throw err;
       }
       if (res.status === 401) {
-        throw new ControlPlaneAuthError();
+        throw new ControlPlaneError({ kind: "auth" });
       }
       if (res.status >= 400 && res.status < 500) {
         return res;
@@ -133,18 +163,17 @@ export function createControlPlaneClient(opts: ControlPlaneClientOptions): Contr
           await sleep(delay);
           continue;
         }
-        throw new ControlPlaneServerError(res.status, attempt);
+        throw new ControlPlaneError({ kind: "server", status: res.status, attempts: attempt });
       }
       return res;
     }
-    // Unreachable; the loop returns or throws.
-    throw new ControlPlaneServerError(lastStatus, maxAttempts);
+    throw new ControlPlaneError({ kind: "server", status: lastStatus, attempts: maxAttempts });
   }
 
   return {
     async register(payload: RegisterPayload): Promise<void> {
       const res = await callWithRetry("register", () =>
-        fetch(`${baseUrl}/sessions`, {
+        singleAttempt(`${baseUrl}/sessions`, {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
@@ -155,49 +184,48 @@ export function createControlPlaneClient(opts: ControlPlaneClientOptions): Contr
       );
       if (res.status === 201) return;
       if (res.status === 400) {
-        let serverMsg = "(no message)";
+        let serverMessage = "(no message)";
         try {
           const body = (await res.json()) as { error?: unknown };
-          if (typeof body.error === "string") serverMsg = body.error;
+          if (typeof body.error === "string") serverMessage = body.error;
         } catch {
-          // Swallow body-parse error — server response shape diverges, not fatal.
+          // Body wasn't valid JSON — fall through to "(no message)".
         }
-        throw new ControlPlaneValidationError(serverMsg);
+        throw new ControlPlaneError({ kind: "validation", serverMessage });
       }
-      throw new ControlPlaneServerError(res.status, 1);
+      throw new ControlPlaneError({ kind: "server", status: res.status, attempts: 1 });
     },
 
-    async deregister(sessionId: string): Promise<void> {
-      try {
-        const res = await callWithRetry("deregister", () =>
-          fetch(`${baseUrl}/sessions/${encodeURIComponent(sessionId)}`, {
-            method: "DELETE",
-            headers: { Authorization: authHeader },
-          })
-        );
-        if (res.status === 204 || res.status === 404) return;
-        if (res.status === 400) {
-          let serverMsg = "(no message)";
-          try {
-            const body = (await res.json()) as { error?: unknown };
-            if (typeof body.error === "string") serverMsg = body.error;
-          } catch {
-            // swallow
-          }
-          throw new ControlPlaneValidationError(serverMsg);
-        }
-        throw new ControlPlaneServerError(res.status, 1);
-      } catch (err) {
-        // On deregister, ECONNREFUSED is tolerated — the proxy may be shutting
-        // down. Log loud (operator should know the registration is in a
-        // partial state) but do not throw — the CLI's cleanup path already
-        // counts this as a leak via the outer exit code.
-        if (err instanceof ControlPlaneConnectError) {
-          log.warn({ sessionId, err: err.message }, "deregister: control plane unreachable — registration may leak");
-          throw err;
+    async deregister(sessionId: SessionId): Promise<void> {
+      // On deregister, log loud BEFORE rethrowing so the CLI's leak-detection
+      // can convert it to exit 70.
+      const res = await callWithRetry("deregister", () =>
+        singleAttempt(`${baseUrl}/sessions/${encodeURIComponent(sessionId)}`, {
+          method: "DELETE",
+          headers: { Authorization: authHeader },
+        })
+      ).catch((err) => {
+        if (err instanceof ControlPlaneError) {
+          log.warn({ sessionId, failure: err.failure }, "deregister failed — registration may leak");
         }
         throw err;
+      });
+      if (res.status === 204) return;
+      if (res.status === 404) {
+        log.warn({ sessionId }, "deregister returned 404 — session was not in registry");
+        return;
       }
+      if (res.status === 400) {
+        let serverMessage = "(no message)";
+        try {
+          const body = (await res.json()) as { error?: unknown };
+          if (typeof body.error === "string") serverMessage = body.error;
+        } catch {
+          // Body wasn't valid JSON — fall through to "(no message)".
+        }
+        throw new ControlPlaneError({ kind: "validation", serverMessage });
+      }
+      throw new ControlPlaneError({ kind: "server", status: res.status, attempts: 1 });
     },
   };
 }

@@ -1,15 +1,12 @@
 import { childLogger } from "../logger.js";
-import { mintSessionId as defaultMintSessionId } from "../orchestrator/session-id.js";
-import { parseManifestFile, type AgentManifestEntry } from "./manifest.js";
+import { mintSessionId as defaultMintSessionId, type SessionId } from "../orchestrator/session-id.js";
+import { parseManifestFile, validateWorkspace, type AgentManifestEntry } from "./manifest.js";
 import {
   createControlPlaneClient,
-  ControlPlaneAuthError,
-  ControlPlaneConnectError,
-  ControlPlaneServerError,
-  ControlPlaneValidationError,
+  ControlPlaneError,
   type ControlPlaneClient,
 } from "./control-plane-client.js";
-import { createSbxRunner, SbxCommandError, type SbxRunner } from "./sbx-runner.js";
+import { createSbxRunner, type SbxRunner } from "./sbx-runner.js";
 import { writeMcpConfig } from "./mcp-config-writer.js";
 
 const log = childLogger("dispatch");
@@ -20,11 +17,16 @@ export const EXIT_CODES = {
   MISSING_TOKEN: 65,
   REGISTER_FAIL: 66,
   SBX_FAIL: 67,
+  WORKSPACE_INVALID: 68,
   MCP_CONFIG_CONFLICT: 69,
   CLEANUP_LEAK: 70,
+  INTERNAL_ERROR: 71,
 } as const;
 
+export type ExitCode = (typeof EXIT_CODES)[keyof typeof EXIT_CODES] | number;
+
 const DEFAULT_PROXY_PORT = 18923;
+const SANDBOX_NAME_SLICE = 10;
 
 interface ParsedArgs {
   manifestPath: string;
@@ -47,7 +49,9 @@ function parseArgs(argv: readonly string[]): ParsedArgs | { error: string } {
       const v = argv[++i];
       if (!v) return { error: "--proxy-port requires a value" };
       const p = parseInt(v, 10);
-      if (!Number.isFinite(p) || p < 1 || p > 65535) return { error: `Invalid --proxy-port "${v}"` };
+      if (!Number.isFinite(p) || String(p) !== v || p < 1 || p > 65535) {
+        return { error: `Invalid --proxy-port "${v}"` };
+      }
       proxyPort = p;
     } else if (a === "--force") {
       force = true;
@@ -67,18 +71,19 @@ export interface DispatchDeps {
   readonly hostEnv?: Record<string, string | undefined>;
   readonly sbxRunner?: SbxRunner;
   readonly controlPlaneClient?: ControlPlaneClient;
-  readonly mintSessionId?: () => string;
+  readonly mintSessionId?: () => SessionId;
+  /** AbortSignal that fires on SIGINT/SIGTERM; plumbed into execAgent. */
+  readonly signal?: AbortSignal;
 }
 
-export async function runDispatch(argv: string[]): Promise<number> {
-  return runDispatchWithDeps(argv, {});
+export async function runDispatch(argv: readonly string[], signal?: AbortSignal): Promise<ExitCode> {
+  return runDispatchWithDeps(argv, { signal });
 }
 
-export async function runDispatchWithDeps(argv: readonly string[], deps: DispatchDeps): Promise<number> {
+export async function runDispatchWithDeps(argv: readonly string[], deps: DispatchDeps): Promise<ExitCode> {
   const hostEnv = deps.hostEnv ?? (process.env as Record<string, string | undefined>);
   const mintId = deps.mintSessionId ?? defaultMintSessionId;
 
-  // 1. Parse argv
   const parsed = parseArgs(argv);
   if ("error" in parsed) {
     log.error({ err: parsed.error }, "dispatch: bad invocation");
@@ -86,7 +91,6 @@ export async function runDispatchWithDeps(argv: readonly string[], deps: Dispatc
     return EXIT_CODES.MANIFEST_INVALID;
   }
 
-  // 2. Token presence
   const token = hostEnv.MCP_CONTROL_TOKEN;
   if (typeof token !== "string" || token.length === 0) {
     process.stderr.write(
@@ -96,14 +100,13 @@ export async function runDispatchWithDeps(argv: readonly string[], deps: Dispatc
     return EXIT_CODES.MISSING_TOKEN;
   }
 
-  // 3. Manifest
   let entry: AgentManifestEntry;
   try {
     const manifest = parseManifestFile(parsed.manifestPath);
     if (manifest.agents.length !== 1) {
       process.stderr.write(
-        `Tier 1.4 supports exactly one agent per manifest; got ${manifest.agents.length}. ` +
-          "Tier 1.5 will add parallel dispatch.\n"
+        `The dispatch CLI accepts exactly one agent per manifest; got ${manifest.agents.length}. ` +
+          "Multi-agent dispatch is a planned extension.\n"
       );
       return EXIT_CODES.MANIFEST_INVALID;
     }
@@ -113,27 +116,36 @@ export async function runDispatchWithDeps(argv: readonly string[], deps: Dispatc
     return EXIT_CODES.MANIFEST_INVALID;
   }
 
-  // 4. Apply CLI overrides
-  const workspace = parsed.workspaceOverride ?? entry.workspace;
-  const proxyPort =
-    parsed.proxyPort ??
-    (hostEnv.MCP_PROXY_PORT ? parseInt(hostEnv.MCP_PROXY_PORT, 10) : DEFAULT_PROXY_PORT);
-  if (!Number.isFinite(proxyPort) || proxyPort < 1 || proxyPort > 65535) {
-    process.stderr.write(`Invalid proxy port: ${proxyPort}\n`);
-    return EXIT_CODES.MANIFEST_INVALID;
+  // Workspace override goes through the same validation as the manifest's
+  // workspace field — must be absolute, exist, be a directory.
+  let workspace: string;
+  try {
+    workspace =
+      parsed.workspaceOverride !== undefined
+        ? validateWorkspace(parsed.workspaceOverride, "--workspace")
+        : entry.workspace;
+  } catch (err) {
+    process.stderr.write(`${err instanceof Error ? err.message : String(err)}\n`);
+    return EXIT_CODES.WORKSPACE_INVALID;
   }
 
-  // 5. Mint session-id, derive sandbox name
-  const sessionId = mintId();
-  const sandboxName = entry.sandboxName ?? `ap-${entry.agentType}-${sessionId.slice(0, 6)}`;
+  const proxyPortRaw =
+    parsed.proxyPort ??
+    (hostEnv.MCP_PROXY_PORT ? parseInt(hostEnv.MCP_PROXY_PORT, 10) : DEFAULT_PROXY_PORT);
+  if (!Number.isFinite(proxyPortRaw) || proxyPortRaw < 1 || proxyPortRaw > 65535) {
+    process.stderr.write(`Invalid proxy port: ${proxyPortRaw}\n`);
+    return EXIT_CODES.MANIFEST_INVALID;
+  }
+  const proxyPort = proxyPortRaw;
 
-  // 6. Build clients (or use injected ones)
+  const sessionId = mintId();
+  const sandboxName =
+    entry.sandboxName ?? `ap-${entry.agentType}-${sessionId.slice(0, SANDBOX_NAME_SLICE)}`;
+
   const cpClient =
-    deps.controlPlaneClient ??
-    createControlPlaneClient({ token, baseUrl: undefined });
+    deps.controlPlaneClient ?? createControlPlaneClient({ token, baseUrl: undefined });
   const sbxRunner = deps.sbxRunner ?? createSbxRunner({ hostEnv });
 
-  // 7. Register
   try {
     await cpClient.register({
       sessionId,
@@ -141,33 +153,25 @@ export async function runDispatchWithDeps(argv: readonly string[], deps: Dispatc
       allowedTools: [...entry.allowedTools],
     });
   } catch (err) {
-    if (err instanceof ControlPlaneAuthError) {
-      process.stderr.write(`${err.message}\n`);
-      return EXIT_CODES.REGISTER_FAIL;
-    }
-    if (err instanceof ControlPlaneValidationError) {
-      process.stderr.write(`${err.message}\n`);
-      return EXIT_CODES.REGISTER_FAIL;
-    }
-    if (err instanceof ControlPlaneServerError || err instanceof ControlPlaneConnectError) {
+    if (err instanceof ControlPlaneError) {
       process.stderr.write(`${err.message}\n`);
       return EXIT_CODES.REGISTER_FAIL;
     }
     log.error({ err }, "dispatch: unexpected register error");
-    process.stderr.write(`Unexpected error during register: ${err instanceof Error ? err.message : err}\n`);
+    process.stderr.write(
+      `Unexpected error during register: ${err instanceof Error ? err.message : err}\n`
+    );
     return EXIT_CODES.REGISTER_FAIL;
   }
 
-  // 8. From here on, every exit path must run cleanup.
+  // Past this point, every exit path must run the finally cleanup.
   let agentExitCode = 0;
-  let sbxError = false;
-  let cleanupError = false;
-  let policyIds: readonly string[] = [];
+  let earlyExitCode: ExitCode | undefined;
+  let thrownDuringRun: unknown;
   let createdSandbox = false;
-  let mcpConfigWritten = false;
+  let policyIds: readonly string[] = [];
 
   try {
-    // 8a. Write .mcp.json (before the sandbox boots so the bind-mount picks it up)
     try {
       writeMcpConfig({
         workspace,
@@ -176,14 +180,12 @@ export async function runDispatchWithDeps(argv: readonly string[], deps: Dispatc
         proxyUrl: `http://host.docker.internal:${proxyPort}/mcp`,
         force: parsed.force,
       });
-      mcpConfigWritten = true;
     } catch (err) {
       process.stderr.write(`${err instanceof Error ? err.message : err}\n`);
-      sbxError = true;
-      return EXIT_CODES.MCP_CONFIG_CONFLICT;
+      earlyExitCode = EXIT_CODES.MCP_CONFIG_CONFLICT;
+      return earlyExitCode;
     }
 
-    // 8b. Create sandbox
     try {
       await sbxRunner.createSandbox({
         name: sandboxName,
@@ -193,38 +195,61 @@ export async function runDispatchWithDeps(argv: readonly string[], deps: Dispatc
       createdSandbox = true;
     } catch (err) {
       process.stderr.write(`sbx create failed: ${err instanceof Error ? err.message : err}\n`);
-      sbxError = true;
-      return EXIT_CODES.SBX_FAIL;
+      earlyExitCode = EXIT_CODES.SBX_FAIL;
+      return earlyExitCode;
     }
 
-    // 8c. Network policy
     try {
       const { policyIds: ids } = await sbxRunner.allowNetwork(proxyPort);
       policyIds = ids;
     } catch (err) {
       process.stderr.write(`sbx policy allow failed: ${err instanceof Error ? err.message : err}\n`);
-      sbxError = true;
-      return EXIT_CODES.SBX_FAIL;
+      earlyExitCode = EXIT_CODES.SBX_FAIL;
+      return earlyExitCode;
     }
 
-    // 8d. Run the agent
-    const result = await sbxRunner.execAgent({ name: sandboxName, command: entry.agentCommand });
-    agentExitCode = result.exitCode;
-    return agentExitCode;
+    try {
+      const result = await sbxRunner.execAgent({
+        name: sandboxName,
+        command: entry.agentCommand,
+        signal: deps.signal,
+      });
+      agentExitCode = result.exitCode;
+      return agentExitCode;
+    } catch (err) {
+      thrownDuringRun = err;
+      process.stderr.write(`sbx exec failed: ${err instanceof Error ? err.message : err}\n`);
+      earlyExitCode = EXIT_CODES.SBX_FAIL;
+      return earlyExitCode;
+    }
   } finally {
-    // Cleanup — best-effort but loud on failure.
+    // Cleanup — best-effort but loud on failure. Leaks exit non-zero (70).
+    let cleanupLeak = false;
+
     if (createdSandbox || policyIds.length > 0) {
       try {
-        await sbxRunner.tearDown({ name: sandboxName, policyIds });
+        const { failures } = await sbxRunner.tearDown({ name: sandboxName, policyIds });
+        if (failures.length > 0) {
+          cleanupLeak = true;
+          process.stderr.write(
+            `WARNING: ${failures.length} sbx tearDown step(s) failed — sandbox/policy may leak:\n` +
+              failures.map((f) => `  - ${f.label}${f.policyId ? ` ${f.policyId}` : ""}: ${f.message}`).join("\n") +
+              "\nRecover with `sbx ls`, `sbx rm <name>`, `sbx policy ls`, `sbx policy rm network --id <id>`.\n"
+          );
+        }
       } catch (err) {
-        log.warn({ err: err instanceof Error ? err.message : err }, "tearDown threw (already best-effort inside)");
+        cleanupLeak = true;
+        log.error({ err: err instanceof Error ? err.message : err }, "tearDown threw");
+        process.stderr.write(
+          `WARNING: sbx tearDown threw: ${err instanceof Error ? err.message : err}\n`
+        );
       }
     }
-    void mcpConfigWritten;
+
     try {
       await cpClient.deregister(sessionId);
     } catch (err) {
-      cleanupError = true;
+      cleanupLeak = true;
       const msg = err instanceof Error ? err.message : String(err);
       log.error({ sessionId, err: msg }, "deregister FAILED — session may leak in registry");
       process.stderr.write(
@@ -232,16 +257,18 @@ export async function runDispatchWithDeps(argv: readonly string[], deps: Dispatc
           "The session may leak until the proxy restarts or you DELETE it manually.\n"
       );
     }
-    void sbxError;
-    // If cleanup leaked, override the return value via a side channel.
-    if (cleanupError) {
-      // eslint-disable-next-line no-unsafe-finally
-      // The finally block runs after the return; override exit code.
+
+    if (cleanupLeak) {
+      // If the try block also threw, surface that information before the
+      // CLEANUP_LEAK return discards it.
+      if (thrownDuringRun !== undefined) {
+        log.error(
+          { err: thrownDuringRun instanceof Error ? thrownDuringRun.message : thrownDuringRun },
+          "original failure preceding cleanup leak"
+        );
+      }
       // eslint-disable-next-line no-unsafe-finally
       return EXIT_CODES.CLEANUP_LEAK;
     }
   }
 }
-
-// Silence ts unused warnings — the variables are read inside the finally block.
-void SbxCommandError;

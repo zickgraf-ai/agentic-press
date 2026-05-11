@@ -1,10 +1,19 @@
 import { randomBytes } from "node:crypto";
 
-// 16 bytes = 128 bits of entropy. Threat-model row 4 (identity spoofing)
-// requires session IDs unguessable by a colocated sandbox; this provides
-// the floor on which that defence rests. Bumping above 16 is safe; below is not.
+declare const sessionIdBrand: unique symbol;
+export type SessionId = string & { readonly [sessionIdBrand]: true };
+
+// 128 bits — unguessable session IDs are the floor of the identity-spoofing
+// defence (docs/security.md#identity-spoofing). Safe to raise, not lower.
 export const SESSION_ID_BYTES = 16;
 
-export function mintSessionId(): string {
-  return randomBytes(SESSION_ID_BYTES).toString("hex");
+export function mintSessionId(): SessionId {
+  return randomBytes(SESSION_ID_BYTES).toString("hex") as SessionId;
+}
+
+// Cast a known-valid string (e.g. from a validated header on a different
+// request path) to the branded type. Use sparingly; mintSessionId is the
+// canonical constructor.
+export function asSessionId(s: string): SessionId {
+  return s as SessionId;
 }

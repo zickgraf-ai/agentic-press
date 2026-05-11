@@ -1,8 +1,9 @@
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, statSync, symlinkSync } from "node:fs";
+import { describe, it, expect, beforeAll, afterAll } from "vitest";
+import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, statSync, chmodSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { writeMcpConfig, MCP_CONFIG_FILENAME } from "../../src/dispatch/mcp-config-writer.js";
+import { asSessionId } from "../../src/orchestrator/session-id.js";
 
 let TMP_ROOT: string;
 
@@ -15,12 +16,11 @@ afterAll(() => {
 });
 
 function freshWorkspace(): string {
-  const ws = mkdtempSync(join(TMP_ROOT, "ws-"));
-  return ws;
+  return mkdtempSync(join(TMP_ROOT, "ws-"));
 }
 
 const SAMPLE = {
-  sessionId: "1234567890abcdef1234567890abcdef",
+  sessionId: asSessionId("1234567890abcdef1234567890abcdef"),
   agentType: "reviewer",
   proxyUrl: "http://host.docker.internal:18923/mcp",
 };
@@ -48,9 +48,7 @@ describe("writeMcpConfig", () => {
   it("writes the file with mode 0644", () => {
     const ws = freshWorkspace();
     const written = writeMcpConfig({ workspace: ws, ...SAMPLE });
-    const stat = statSync(written);
-    // mask off file-type bits
-    expect(stat.mode & 0o777).toBe(0o644);
+    expect(statSync(written).mode & 0o777).toBe(0o644);
   });
 
   it("canonicalizes workspace through realpath before joining", () => {
@@ -58,18 +56,25 @@ describe("writeMcpConfig", () => {
     const linkPath = join(TMP_ROOT, `link-${Date.now()}-${Math.random().toString(36).slice(2)}`);
     symlinkSync(realWs, linkPath, "dir");
     const written = writeMcpConfig({ workspace: linkPath, ...SAMPLE });
-    // Should be inside the real workspace, not under the symlink path.
     expect(written).toBe(join(realWs, MCP_CONFIG_FILENAME));
   });
 
-  it("is a no-op when the existing file is identical", () => {
+  it("repeats are idempotent: identical content doesn't bump mtime", () => {
     const ws = freshWorkspace();
     const first = writeMcpConfig({ workspace: ws, ...SAMPLE });
     const before = statSync(first).mtimeMs;
-    // Sleep tiny then re-run — mtime should not advance if no write occurred.
     const second = writeMcpConfig({ workspace: ws, ...SAMPLE });
     const after = statSync(second).mtimeMs;
     expect(before).toBe(after);
+  });
+
+  it("idempotent path also re-asserts mode 0644 (operator may have chmod'd)", () => {
+    const ws = freshWorkspace();
+    const written = writeMcpConfig({ workspace: ws, ...SAMPLE });
+    chmodSync(written, 0o600);
+    expect(statSync(written).mode & 0o777).toBe(0o600);
+    writeMcpConfig({ workspace: ws, ...SAMPLE });
+    expect(statSync(written).mode & 0o777).toBe(0o644);
   });
 
   it("refuses to overwrite a conflicting .mcp.json without force", () => {
@@ -82,14 +87,32 @@ describe("writeMcpConfig", () => {
     expect(() => writeMcpConfig({ workspace: ws, ...SAMPLE })).toThrow(/already exists|--force/i);
   });
 
-  it("overwrites a conflicting .mcp.json with force: true", () => {
+  it("overwrites a conflicting .mcp.json with force: true and lands at 0644", () => {
     const ws = freshWorkspace();
     const path = join(ws, MCP_CONFIG_FILENAME);
     writeFileSync(path, JSON.stringify({ mcpServers: { other: { type: "stdio" } } }), "utf8");
+    chmodSync(path, 0o600);
     const written = writeMcpConfig({ workspace: ws, ...SAMPLE, force: true });
     expect(written).toBe(path);
     const content = JSON.parse(readFileSync(written, "utf8"));
     expect(content.mcpServers["agentic-press"]).toBeDefined();
     expect(content.mcpServers.other).toBeUndefined();
+    expect(statSync(written).mode & 0o777).toBe(0o644);
+  });
+
+  it("broken symlink throws an actionable error", () => {
+    const linkPath = join(TMP_ROOT, `broken-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    symlinkSync(join(TMP_ROOT, "does-not-exist-target"), linkPath, "dir");
+    expect(() => writeMcpConfig({ workspace: linkPath, ...SAMPLE })).toThrow();
+  });
+
+  it("symlink pointing at a file (not a directory) fails before writing", () => {
+    const filePath = join(TMP_ROOT, `target-file-${Date.now()}`);
+    writeFileSync(filePath, "not a directory", "utf8");
+    const linkPath = join(TMP_ROOT, `link-to-file-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    symlinkSync(filePath, linkPath, "file");
+    // realpathSync resolves to the file path, then join produces <file>/.mcp.json,
+    // and writeFileSync fails with ENOTDIR.
+    expect(() => writeMcpConfig({ workspace: linkPath, ...SAMPLE })).toThrow();
   });
 });
