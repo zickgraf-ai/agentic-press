@@ -84,6 +84,26 @@ let auditWritten = 0;
 let auditSkipped = 0;
 let skillMetricsWritten = 0;
 let skillMetricsSkipped = 0;
+// Phase-failure escalation: each phase catches its own exceptions so one
+// bad phase does not block the other, but any phase failure escalates to
+// a non-zero process exit code at the bottom of the script so launchd /
+// CI gates can detect it. Each catch must (1) set its *Failed flag and
+// (2) call logPhaseFailure to emit a structured stderr line.
+let auditFailed = false;
+let skillMetricsFailed = false;
+
+/**
+ * Emit `[sweep:<phase>] FAILED (<name> <code>): <message>` plus stack
+ * (when present) to stderr. Mirrors the catch-narrowing convention in
+ * `src/improvements/skill-usage-report.ts:warnSkipped`.
+ */
+function logPhaseFailure(phase, err) {
+  const code = err?.code ?? "UNKNOWN";
+  const name = err?.name ?? "Error";
+  const message = err instanceof Error ? err.message : String(err);
+  console.error(`[sweep:${phase}] FAILED (${name} ${code}): ${message}`);
+  if (err?.stack) console.error(err.stack);
+}
 
 // ---- Phase 1: Audit ----
 if (!opts.skipAudit) {
@@ -112,8 +132,8 @@ if (!opts.skipAudit) {
         auditWritten++;
       }
     } catch (err) {
-      console.error(`[sweep:audit] FAILED: ${err.message}`);
-      if (err.stack) console.error(err.stack);
+      auditFailed = true;
+      logPhaseFailure("audit", err);
     }
   }
 }
@@ -173,14 +193,20 @@ if (!opts.skipSkillMetrics) {
       }
     }
   } catch (err) {
-    console.error(`[sweep:skill] FAILED: ${err.message}`);
-    if (err.stack) console.error(err.stack);
+    skillMetricsFailed = true;
+    logPhaseFailure("skill", err);
   }
 }
 
 console.log(
   `[sweep] done — audit: wrote ${auditWritten}, skipped ${auditSkipped} | skill: wrote ${skillMetricsWritten}, skipped ${skillMetricsSkipped}`
 );
+
+if (auditFailed || skillMetricsFailed) {
+  // process.exitCode (not process.exit) so the event loop drains stdio
+  // cleanly. Both phases have already run; this only escalates the code.
+  process.exitCode = 1;
+}
 
 function parseEntries(text) {
   const entries = [];
