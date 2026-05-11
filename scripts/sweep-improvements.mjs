@@ -84,19 +84,25 @@ let auditWritten = 0;
 let auditSkipped = 0;
 let skillMetricsWritten = 0;
 let skillMetricsSkipped = 0;
+// Phase-failure escalation: each phase catches its own exceptions so one
+// bad phase does not block the other, but any phase failure escalates to
+// a non-zero process exit code at the bottom of the script so launchd /
+// CI gates can detect it. Each catch must (1) set its *Failed flag and
+// (2) call logPhaseFailure to emit a structured stderr line.
 let auditFailed = false;
 let skillMetricsFailed = false;
 
-// Phase-level catches preserve the "one bad phase does not block the other"
-// invariant. The phase-failed flags drive the final non-zero exit so the
-// sweep failure is visible (launchd surfaces a non-zero exit; a buried
-// console.error in a log file nobody reads is not enough — see #64).
+/**
+ * Emit `[sweep:<phase>] FAILED (<name> <code>): <message>` plus stack
+ * (when present) to stderr. Mirrors the catch-narrowing convention in
+ * `src/improvements/skill-usage-report.ts:warnSkipped`.
+ */
 function logPhaseFailure(phase, err) {
-  const code = err && err.code ? err.code : "UNKNOWN";
-  const name = err && err.name ? err.name : "Error";
+  const code = err?.code ?? "UNKNOWN";
+  const name = err?.name ?? "Error";
   const message = err instanceof Error ? err.message : String(err);
   console.error(`[sweep:${phase}] FAILED (${name} ${code}): ${message}`);
-  if (err && err.stack) console.error(err.stack);
+  if (err?.stack) console.error(err.stack);
 }
 
 // ---- Phase 1: Audit ----
@@ -197,9 +203,8 @@ console.log(
 );
 
 if (auditFailed || skillMetricsFailed) {
-  // Non-zero exit so launchd's wrapper sees the failure (and so any future
-  // CI invocation gates on it). Both phases still ran — see logPhaseFailure
-  // above — only the final exit code is escalated.
+  // process.exitCode (not process.exit) so the event loop drains stdio
+  // cleanly. Both phases have already run; this only escalates the code.
   process.exitCode = 1;
 }
 
