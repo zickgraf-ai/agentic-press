@@ -116,6 +116,62 @@ Tear down when done:
 sbx rm ap-dev
 ```
 
+## 7. Dispatching an agent with per-session allowlist (Tier 1.4)
+
+When you want an agent to run against a **narrower** allowlist than the global `ALLOWED_TOOLS`, use the dispatch CLI. It mints a session ID, registers a per-session allowlist with the control plane, writes a workspace-local `.mcp.json` so the agent sends the right identity headers, runs the agent inside a fresh sandbox, and deregisters on exit.
+
+Prerequisites:
+- `MCP_CONTROL_TOKEN` set in `.envrc` (`openssl rand -hex 32`). The dispatch CLI reads it from its own host env — it is **never** written to the workspace or passed into the sandbox.
+- Proxy running on the host (`npm run dev`).
+- A workspace directory (typically a git worktree) that exists, is absolute, and that you're happy to be bind-mounted into the sandbox.
+
+Write a manifest (`reviewer.json`):
+
+```json
+{
+  "agents": [
+    {
+      "agentType": "reviewer",
+      "allowedTools": ["echo__read_file", "echo__list_files"],
+      "agentCommand": ["claude"],
+      "workspace": "/Users/you/code/agentic-press-worktrees/feat-99-something",
+      "sandboxName": "ap-reviewer-99"
+    }
+  ]
+}
+```
+
+Run it:
+
+```bash
+npm run dispatch -- reviewer.json
+# or, once installed via npm link / npm install -g:
+apd reviewer.json
+```
+
+Available flags:
+
+- `--workspace <abs-dir>` — override `agents[0].workspace` (must be absolute and exist)
+- `--proxy-port <port>` — override the URL written into `.mcp.json` (defaults to `MCP_PROXY_PORT` or 18923)
+- `--force` — overwrite an existing non-conforming `.mcp.json` in the workspace
+
+Exit codes:
+
+| Code | Meaning |
+|---|---|
+| 0 | Agent exited 0, cleanup clean |
+| (agent's) | Agent non-zero, cleanup clean |
+| 64 | Manifest invalid (parse, schema, or Tier 1.4 multi-agent guardrail) |
+| 65 | `MCP_CONTROL_TOKEN` missing on host |
+| 66 | Control-plane registration failed (401 / 400 / 5xx / network) |
+| 67 | sbx command failed (create / exec / policy) |
+| 69 | Conflicting pre-existing `.mcp.json` without `--force` |
+| 70 | Cleanup leak — registry DELETE failed. Recover with `curl -X DELETE -H "Authorization: Bearer …" http://127.0.0.1:18924/sessions/<id>` or restart the proxy (registry is in-memory). |
+
+What gets written into the workspace: a single `.mcp.json` at the workspace root pointing the agent at `http://host.docker.internal:18923/mcp` with `X-Agent-Session-Id` and `X-Agent-Type` headers wired in. Mode 0644, host-writable only. Idempotent if re-run with the same identity.
+
+Tier 1.4 dispatches one agent per invocation. Parallel multi-agent dispatch is Tier 1.5.
+
 ## Network policy reference
 
 sbx sandboxes deny all egress by default. The proxy is reachable only after:

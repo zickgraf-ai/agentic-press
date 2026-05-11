@@ -125,6 +125,12 @@ Tier 1.3 (#56) introduces a **second HTTP listener** alongside the proxy: the co
 | 5 | **Confused deputy via dispatch CLI** — agent influences the dispatch CLI (which holds the token) into registering a permissive session for it | Tier 1.4 contract: dispatch CLI constructs the registration payload from operator-provided manifest only — never from sandbox stdout, never from sandbox-writable files | None at the control-plane layer (this lives one layer up) | Tier 1.3 must not preclude this contract. Future MC connectors must inherit it. |
 | 6 | **Self-elevation via /mcp** — agent calls a /mcp method that mutates the registry | Not a vector by construction: `/mcp` doesn't speak the control-plane protocol; the proxy reads but never writes the registry. Type-level guard: `ProxyServerConfig.registry` is `Pick<SessionRegistry, "lookup">`, so a TypeScript-level mistake won't compile | Code review for any new `/mcp` admin method | A future PR adding `/mcp/admin` would need explicit Plan-Mode approval. |
 
+**How Tier 1.4 (#62) enforces the contracts above:**
+
+- **Row 3 (token theft):** `src/dispatch/sbx-runner.ts` builds the `sbx exec` child environment from a **positive allow-list** (`PATH`, `HOME`, common shell/locale vars, `SBX_STUB_*` for test plumbing). `MCP_CONTROL_TOKEN` is not in the allow-list and is additionally blocked by a `FORBIDDEN_ENV_PREFIXES` belt-and-braces check. The dispatch CLI logs through the standard pino tree; the token is held in a closure inside `createControlPlaneClient` and never appears in error messages or logged objects (locked by `tests/dispatch/control-plane-client.test.ts`).
+- **Row 4 (identity spoofing):** session IDs are minted in `src/orchestrator/session-id.ts` as `crypto.randomBytes(16).toString("hex")` — 128 bits of entropy, 32 hex chars. The output matches `validateSessionInput`'s charset and length envelope (verified by `tests/orchestrator/session-id.test.ts`).
+- **Row 5 (confused deputy):** the `POST /sessions` payload is constructed only from the manifest file passed on argv. The dispatch CLI writes `.mcp.json` into the workspace but never reads it back. No sandbox is running when the manifest is parsed.
+
 **Defences explicitly NOT added:**
 
 | Not added | Reason |
