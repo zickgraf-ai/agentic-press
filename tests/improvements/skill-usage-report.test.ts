@@ -45,7 +45,7 @@ afterEach(() => {
 describe("computeMetrics", () => {
   it("emits one row per vendored skill, alphabetical by name", () => {
     const skills = [skill("subagent-driven-development", 14), skill("brainstorming", 7)];
-    const m = computeMetrics([], skills, 0, NOW.toISOString(), NOW.toISOString(), NOW);
+    const m = computeMetrics([], skills, NOW.toISOString(), NOW.toISOString(), NOW);
     expect(m.perSkill.map((r) => r.skillName)).toEqual([
       "brainstorming",
       "subagent-driven-development",
@@ -60,7 +60,7 @@ describe("computeMetrics", () => {
       inv({ skillName: "brainstorming", outcome: "abandoned", sessionId: "s2" }),
       inv({ skillName: "brainstorming", outcome: "unknown", sessionId: "s3" }),
     ];
-    const m = computeMetrics(invocations, skills, 5, NOW.toISOString(), NOW.toISOString(), NOW);
+    const m = computeMetrics(invocations, skills, NOW.toISOString(), NOW.toISOString(), NOW);
     const row = m.perSkill[0]!;
     expect(row.invocations).toBe(4);
     expect(row.completed).toBe(2);
@@ -76,13 +76,12 @@ describe("computeMetrics", () => {
       inv({ skillName: "brainstorming", outcome: "completed", sessionId: "s2" }),
       inv({ skillName: "brainstorming", outcome: "abandoned", sessionId: "s3" }),
     ];
-    const m = computeMetrics(completed, skills, 3, NOW.toISOString(), NOW.toISOString(), NOW);
+    const m = computeMetrics(completed, skills, NOW.toISOString(), NOW.toISOString(), NOW);
     expect(m.perSkill[0]!.completionRate).toBeCloseTo(2 / 3, 5);
 
     const noClassified = computeMetrics(
       [inv({ skillName: "brainstorming", outcome: "unknown" })],
       skills,
-      1,
       NOW.toISOString(),
       NOW.toISOString(),
       NOW
@@ -92,8 +91,52 @@ describe("computeMetrics", () => {
 
   it("computes skillAgeDays from now - mtime", () => {
     const skills = [skill("brainstorming", 14)];
-    const m = computeMetrics([], skills, 0, NOW.toISOString(), NOW.toISOString(), NOW);
+    const m = computeMetrics([], skills, NOW.toISOString(), NOW.toISOString(), NOW);
     expect(m.perSkill[0]!.skillAgeDays).toBe(14);
+  });
+
+  it("distinguishes trial invocations (vendored skills only) from total Skill activity", () => {
+    const skills = [skill("brainstorming", 7)];
+    const invocations: ClassifiedInvocation[] = [
+      inv({ skillName: "brainstorming", outcome: "completed", sessionId: "s1" }),
+      // Non-vendored Skill invocations — should count in totals only, not the per-skill table.
+      inv({ skillName: "pr-review-toolkit:review-pr", outcome: "completed", sessionId: "s2" }),
+      inv({ skillName: "loop", outcome: "completed", sessionId: "s3" }),
+    ];
+    const m = computeMetrics(invocations, skills, NOW.toISOString(), NOW.toISOString(), NOW);
+    expect(m.trialInvocations).toBe(1);
+    expect(m.totalInvocations).toBe(3);
+    expect(m.trialSessionsUsedIn).toBe(1);
+    expect(m.totalSessionsWithSkillActivity).toBe(3);
+    // The non-trial invocations must NOT leak into the per-skill table.
+    expect(m.perSkill.find((r) => r.skillName === "brainstorming")!.invocations).toBe(1);
+    expect(m.perSkill.map((r) => r.skillName)).toEqual(["brainstorming"]);
+  });
+
+  it("trialInvocations equals totalInvocations when all invocations are for vendored skills", () => {
+    const skills = [skill("brainstorming", 7), skill("systematic-debugging", 7)];
+    const invocations: ClassifiedInvocation[] = [
+      inv({ skillName: "brainstorming", outcome: "completed", sessionId: "s1" }),
+      inv({ skillName: "systematic-debugging", outcome: "completed", sessionId: "s2" }),
+    ];
+    const m = computeMetrics(invocations, skills, NOW.toISOString(), NOW.toISOString(), NOW);
+    expect(m.trialInvocations).toBe(m.totalInvocations);
+    expect(m.trialSessionsUsedIn).toBe(m.totalSessionsWithSkillActivity);
+  });
+
+  it("counts a session once in both trial and total when it has both types", () => {
+    // Same sessionId for a vendored invocation AND a non-trial invocation —
+    // both Set-based session counters must dedupe to 1 each.
+    const skills = [skill("brainstorming", 7)];
+    const invocations: ClassifiedInvocation[] = [
+      inv({ skillName: "brainstorming", outcome: "completed", sessionId: "s1" }),
+      inv({ skillName: "pr-review-toolkit:review-pr", outcome: "completed", sessionId: "s1" }),
+    ];
+    const m = computeMetrics(invocations, skills, NOW.toISOString(), NOW.toISOString(), NOW);
+    expect(m.totalSessionsWithSkillActivity).toBe(1);
+    expect(m.trialSessionsUsedIn).toBe(1);
+    expect(m.totalInvocations).toBe(2);
+    expect(m.trialInvocations).toBe(1);
   });
 });
 
@@ -106,7 +149,6 @@ describe("computeMetrics — verdicts", () => {
     const m = computeMetrics(
       invocations,
       [skill(skillName, ageDays)],
-      Math.max(invocations.length, 1),
       NOW.toISOString(),
       NOW.toISOString(),
       NOW
@@ -214,25 +256,63 @@ describe("computeMetrics — verdicts", () => {
 });
 
 describe("renderReport", () => {
-  it("includes the lookback window and total session count in the header", () => {
+  it("includes the lookback window in the header", () => {
     const skills = [skill("brainstorming", 14)];
     const m = computeMetrics(
       [],
       skills,
-      42,
       "2026-04-09T00:00:00.000Z",
       "2026-05-09T00:00:00.000Z",
       NOW
     );
     const out = renderReport(m);
     expect(out).toMatch(/Window:.*2026-04-09.*2026-05-09/);
-    expect(out).toMatch(/Sessions analyzed:.*42/);
+  });
+
+  it("shows trial-skill activity separately from total Skill-tool activity in the header", () => {
+    const skills = [skill("brainstorming", 7)];
+    const invocations: ClassifiedInvocation[] = [
+      inv({ skillName: "brainstorming", outcome: "completed", sessionId: "s1" }),
+      inv({ skillName: "pr-review-toolkit:review-pr", outcome: "completed", sessionId: "s2" }),
+      inv({ skillName: "loop", outcome: "completed", sessionId: "s3" }),
+    ];
+    const out = renderReport(
+      computeMetrics(invocations, skills, NOW.toISOString(), NOW.toISOString(), NOW)
+    );
+    expect(out).toMatch(/Trial-skill activity:.*1 invocation across 1 session/);
+    expect(out).toMatch(/All Skill-tool activity in window:.*3 invocations across 3 sessions/);
+    expect(out).toMatch(/includes non-trial skills/);
+  });
+
+  it("flags malformed transcript lines in the report header when parseStats.malformedLines > 0", () => {
+    const skills = [skill("brainstorming", 7)];
+    const m = computeMetrics(
+      [],
+      skills,
+      NOW.toISOString(),
+      NOW.toISOString(),
+      NOW,
+      { filesScanned: 5, missingFiles: 0, totalLines: 200, malformedLines: 7 }
+    );
+    const out = renderReport(m);
+    expect(out).toMatch(/Transcripts scanned:.*5/);
+    expect(out).toMatch(/200 lines, 7 malformed/);
+    // Warning glyph must be present so the reader can't miss the signal.
+    expect(out).toContain("⚠️");
+  });
+
+  it("singular/plural agreement in the trial vs total activity counts", () => {
+    const skills = [skill("brainstorming", 7)];
+    const out = renderReport(
+      computeMetrics([], skills, NOW.toISOString(), NOW.toISOString(), NOW)
+    );
+    expect(out).toMatch(/Trial-skill activity:.*0 invocations across 0 sessions/);
   });
 
   it("renders one row per skill in the table", () => {
     const skills = [skill("brainstorming", 7), skill("verification-before-completion", 7)];
     const out = renderReport(
-      computeMetrics([], skills, 0, NOW.toISOString(), NOW.toISOString(), NOW)
+      computeMetrics([], skills, NOW.toISOString(), NOW.toISOString(), NOW)
     );
     expect(out).toContain("| brainstorming");
     expect(out).toContain("| verification-before-completion");
@@ -241,7 +321,7 @@ describe("renderReport", () => {
   it("marks 0-invocation rows with em-dash for completion-rate", () => {
     const skills = [skill("brainstorming", 7)];
     const out = renderReport(
-      computeMetrics([], skills, 0, NOW.toISOString(), NOW.toISOString(), NOW)
+      computeMetrics([], skills, NOW.toISOString(), NOW.toISOString(), NOW)
     );
     expect(out).toMatch(/\|\s*—\s*\|/); // em-dash placeholder somewhere in the row
   });
@@ -249,7 +329,7 @@ describe("renderReport", () => {
   it("ends with a per-skill verdict block", () => {
     const skills = [skill("systematic-debugging", 21)];
     const out = renderReport(
-      computeMetrics([], skills, 0, NOW.toISOString(), NOW.toISOString(), NOW)
+      computeMetrics([], skills, NOW.toISOString(), NOW.toISOString(), NOW)
     );
     expect(out).toMatch(/Verdict/);
     expect(out).toMatch(/systematic-debugging.*DROP/);

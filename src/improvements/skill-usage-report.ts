@@ -41,7 +41,14 @@ export interface PerSkillMetrics {
 export interface SkillUsageMetrics {
   readonly windowStart: string;
   readonly windowEnd: string;
-  readonly totalSessionsAnalyzed: number;
+  /** All `Skill` tool invocations observed in window (trial + non-trial). */
+  readonly totalInvocations: number;
+  /** Total invocations of vendored / trial skills (sum of all `perSkill[].invocations`). */
+  readonly trialInvocations: number;
+  /** Distinct sessions containing any `Skill` tool invocation. */
+  readonly totalSessionsWithSkillActivity: number;
+  /** Distinct sessions where at least one trial skill was invoked. */
+  readonly trialSessionsUsedIn: number;
   readonly perSkill: readonly PerSkillMetrics[];
   /** Optional — surfaced from collectInvocations so the report flags transcript drift. */
   readonly parseStats?: ParseStats;
@@ -139,14 +146,21 @@ export function readVendoredSkills(skillsDir: string): VendoredSkill[] {
 export function computeMetrics(
   invocations: readonly ClassifiedInvocation[],
   skills: readonly VendoredSkill[],
-  totalSessionsAnalyzed: number,
   windowStart: string,
   windowEnd: string,
   now: Date = new Date(),
   parseStats?: ParseStats
 ): SkillUsageMetrics {
+  const trialSkillNames = new Set(skills.map((s) => s.name));
+  const trialInvocationList = invocations.filter((i) => trialSkillNames.has(i.skillName));
+
+  const totalInvocations = invocations.length;
+  const trialInvocations = trialInvocationList.length;
+  const totalSessionsWithSkillActivity = new Set(invocations.map((i) => i.sessionId)).size;
+  const trialSessionsUsedIn = new Set(trialInvocationList.map((i) => i.sessionId)).size;
+
   const byName = new Map<string, ClassifiedInvocation[]>();
-  for (const inv of invocations) {
+  for (const inv of trialInvocationList) {
     const list = byName.get(inv.skillName) ?? [];
     list.push(inv);
     byName.set(inv.skillName, list);
@@ -186,7 +200,10 @@ export function computeMetrics(
   return {
     windowStart,
     windowEnd,
-    totalSessionsAnalyzed,
+    totalInvocations,
+    trialInvocations,
+    totalSessionsWithSkillActivity,
+    trialSessionsUsedIn,
     perSkill,
     parseStats,
   };
@@ -235,18 +252,25 @@ export function renderReport(metrics: SkillUsageMetrics): string {
   lines.push("# Skill Usage — Trial Metrics");
   lines.push("");
   lines.push(`**Window:** ${metrics.windowStart} → ${metrics.windowEnd}`);
-  lines.push(`**Sessions analyzed:** ${metrics.totalSessionsAnalyzed}`);
-  lines.push(`**Generated:** ${new Date().toISOString()}`);
   if (metrics.parseStats) {
     const ps = metrics.parseStats;
     const malformedNote =
       ps.malformedLines === 0
-        ? "0"
-        : `${ps.malformedLines} ⚠️ — investigate transcript-format drift if non-zero`;
-    lines.push(
-      `**Parser stats:** ${ps.filesScanned} files, ${ps.totalLines} lines, ${malformedNote}`
-    );
+        ? `${ps.totalLines} lines, 0 malformed`
+        : `${ps.totalLines} lines, ${ps.malformedLines} malformed ⚠️ — investigate transcript-format drift`;
+    lines.push(`**Transcripts scanned:** ${ps.filesScanned} (${malformedNote})`);
   }
+  // Distinguish trial-subset activity (counts in the per-skill table) from
+  // total Skill-tool activity (includes non-trial skills like pr-review-toolkit,
+  // /loop, /schedule). Without this split a reader could see high total counts
+  // alongside a table of zeros and assume the table is broken.
+  lines.push(
+    `**Trial-skill activity:** ${metrics.trialInvocations} invocation${metrics.trialInvocations === 1 ? "" : "s"} across ${metrics.trialSessionsUsedIn} session${metrics.trialSessionsUsedIn === 1 ? "" : "s"}`
+  );
+  lines.push(
+    `**All Skill-tool activity in window:** ${metrics.totalInvocations} invocation${metrics.totalInvocations === 1 ? "" : "s"} across ${metrics.totalSessionsWithSkillActivity} session${metrics.totalSessionsWithSkillActivity === 1 ? "" : "s"} (includes non-trial skills — only trial skills appear in the table below)`
+  );
+  lines.push(`**Generated:** ${new Date().toISOString()}`);
   lines.push("");
   lines.push("## Per-skill metrics");
   lines.push("");

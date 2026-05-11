@@ -132,13 +132,11 @@ if (!opts.skipSkillMetrics) {
       console.log(`[sweep:skill] no vendored skills found in ${skillsDir} — skipping skill-metrics phase`);
     } else {
       const { invocations, parseStats } = collectInvocations(sessionLogDir, windowStart);
-      const sessionsAnalyzed = new Set(invocations.map((i) => i.sessionId)).size;
 
       // Write the always-regenerated dashboard.
       const metrics = computeMetrics(
         invocations,
         skills,
-        sessionsAnalyzed,
         windowStart,
         windowEnd,
         now,
@@ -148,8 +146,12 @@ if (!opts.skipSkillMetrics) {
       if (!existsSync(metricsDir)) mkdirSync(metricsDir, { recursive: true });
       const reportPath = join(metricsDir, reportFileName(now));
       writeFileSync(reportPath, renderReport(metrics), "utf8");
+      console.log(`[sweep:skill] wrote ${reportPath}`);
       console.log(
-        `[sweep:skill] wrote ${reportPath} (${skills.length} skills, ${invocations.length} invocations across ${sessionsAnalyzed} sessions; parsed ${parseStats.totalLines} lines, ${parseStats.malformedLines} malformed)`
+        `[sweep:skill] ${skills.length} vendored skills | trial: ${metrics.trialInvocations} invocations / ${metrics.trialSessionsUsedIn} sessions | total Skill activity in window: ${metrics.totalInvocations} / ${metrics.totalSessionsWithSkillActivity}`
+      );
+      console.log(
+        `[sweep:skill] parsed ${parseStats.filesScanned} files, ${parseStats.totalLines} lines, ${parseStats.malformedLines} malformed`
       );
 
       // Run anti-signal detector.
