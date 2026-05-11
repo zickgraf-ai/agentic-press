@@ -1,5 +1,5 @@
-import { describe, it, expect, beforeEach, afterEach } from "vitest";
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync, utimesSync } from "node:fs";
+import { describe, it, expect, beforeEach, afterEach, vi } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync, mkdirSync, utimesSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -376,5 +376,55 @@ describe("readVendoredSkills", () => {
     writeFileSync(join(skillsRoot, "loose-file.md"), "## Provenance\n");
     mkdirSync(join(skillsRoot, "no-skill-md-here"));
     expect(readVendoredSkills(skillsRoot)).toEqual([]);
+  });
+
+  it("warns and continues when the skill directory can't be stat'd (broken symlink), returning readable siblings", () => {
+    // Triggers the `statSync(skillDir)` catch. A broken symlink is portable
+    // (no uid dependency) and provokes ENOENT when stat follows the link.
+    const skillsRoot = join(tmpRoot, ".claude", "skills");
+    mkdirSync(join(skillsRoot, "readable"), { recursive: true });
+    writeFileSync(
+      join(skillsRoot, "readable", "SKILL.md"),
+      "---\nname: readable\n---\n\n## Provenance\n\nVendored.\n"
+    );
+    symlinkSync(join(tmpRoot, "definitely-not-here"), join(skillsRoot, "broken-link"));
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const skills = readVendoredSkills(skillsRoot);
+      expect(skills.map((s) => s.name)).toEqual(["readable"]);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      const message = String(warnSpy.mock.calls[0]![0]);
+      expect(message).toContain("[readVendoredSkills]");
+      expect(message).toContain("broken-link");
+    } finally {
+      warnSpy.mockRestore();
+    }
+  });
+
+  it("warns and continues when SKILL.md is unreadable, returning readable siblings", () => {
+    // Triggers the `readFileSync(skillMd)` catch. A directory at the SKILL.md
+    // path provokes EISDIR — portable across uid and platform, unlike
+    // chmod 000 which is a no-op under root (some CI / docker images).
+    const skillsRoot = join(tmpRoot, ".claude", "skills");
+    mkdirSync(join(skillsRoot, "readable"), { recursive: true });
+    mkdirSync(join(skillsRoot, "wedged"), { recursive: true });
+    writeFileSync(
+      join(skillsRoot, "readable", "SKILL.md"),
+      "---\nname: readable\n---\n\n## Provenance\n\nVendored.\n"
+    );
+    mkdirSync(join(skillsRoot, "wedged", "SKILL.md"));
+
+    const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+    try {
+      const skills = readVendoredSkills(skillsRoot);
+      expect(skills.map((s) => s.name)).toEqual(["readable"]);
+      expect(warnSpy).toHaveBeenCalledTimes(1);
+      const message = String(warnSpy.mock.calls[0]![0]);
+      expect(message).toContain("[readVendoredSkills]");
+      expect(message).toContain("wedged");
+    } finally {
+      warnSpy.mockRestore();
+    }
   });
 });
