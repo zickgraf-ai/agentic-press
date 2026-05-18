@@ -1,5 +1,14 @@
 import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from "vitest";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync, existsSync, chmodSync } from "node:fs";
+import {
+  mkdtempSync,
+  mkdirSync,
+  rmSync,
+  writeFileSync,
+  readFileSync,
+  existsSync,
+  chmodSync,
+  realpathSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -129,8 +138,92 @@ describe("sbx-runner", () => {
       sbxBinary: STUB_PATH,
       hostEnv: envBase({ SBX_STUB_EXIT: "42" }),
     });
-    const { exitCode } = await runner.execAgent({ name: "ap-test", command: ["claude"] });
+    const { exitCode } = await runner.execAgent({
+      name: "ap-test",
+      workspace: "/tmp/ws",
+      command: ["claude"],
+    });
     expect(exitCode).toBe(42);
+  });
+
+  it("execAgent wraps command in `bash -lc 'cd \"$1\" && shift && exec \"$@\"' -- <workspace> <cmd...>` so the agent starts at the workspace cwd (issue #75)", async () => {
+    const runner = createSbxRunner({ sbxBinary: STUB_PATH, hostEnv: envBase() });
+    await runner.execAgent({
+      name: "ap-test",
+      workspace: "/tmp/ap-cwd-ws",
+      command: ["claude", "--allowedTools", "echo__x"],
+    });
+    const argv = readCalls()[0].argv;
+    // Shape contract: exec <name> bash -lc <script> -- <workspace> <original cmd...>
+    expect(argv[0]).toBe("exec");
+    expect(argv[1]).toBe("ap-test");
+    expect(argv[2]).toBe("bash");
+    expect(argv[3]).toBe("-lc");
+    // Script body cd's into $1, then execs the rest. Keeping the workspace out
+    // of the script string means paths with spaces/quotes never need
+    // shell-escaping — they ride positional-arg semantics.
+    expect(argv[4]).toContain('cd "$1"');
+    expect(argv[4]).toContain('shift');
+    expect(argv[4]).toContain('exec "$@"');
+    expect(argv[5]).toBe("--"); // dummy $0
+    expect(argv[6]).toBe("/tmp/ap-cwd-ws");
+    expect(argv.slice(7)).toEqual(["claude", "--allowedTools", "echo__x"]);
+  });
+
+  it("workspace paths with spaces/quotes ride positional args unmodified (no shell-escape needed)", async () => {
+    const runner = createSbxRunner({ sbxBinary: STUB_PATH, hostEnv: envBase() });
+    const tricky = "/tmp/has space and 'quote' chars";
+    await runner.execAgent({ name: "ap-test", workspace: tricky, command: ["claude"] });
+    const argv = readCalls()[0].argv;
+    // The workspace appears as a single positional arg — never embedded in the
+    // script string — so the wrapper is safe against pathological paths.
+    expect(argv[6]).toBe(tricky);
+  });
+
+  it("non-zero exit code propagates through the cd-wrapper end-to-end (real bash, not just stub-recorded)", async () => {
+    // The stubs above only record argv and exit with $SBX_STUB_EXIT — they
+    // don't actually run the bash wrapper. This stub strips off "exec <name>"
+    // and execs the remaining args, so the wrapper script runs for real.
+    const realExecStub = join(STUB_BIN_DIR, "sbx-real-exec");
+    writeFileSync(realExecStub, `#!/bin/bash\nshift 2\nexec "$@"\n`, "utf8");
+    chmodSync(realExecStub, 0o755);
+    const ws = mkdtempSync(join(tmpdir(), "ap-cwd-prop-"));
+    try {
+      const runner = createSbxRunner({ sbxBinary: realExecStub, hostEnv: envBase() });
+      const { exitCode } = await runner.execAgent({
+        name: "ap-test",
+        workspace: ws,
+        command: ["bash", "-c", "exit 42"],
+      });
+      expect(exitCode).toBe(42);
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
+  });
+
+  it("cd-wrapper actually changes cwd to workspace before exec (pwd inside the wrapped command sees workspace)", async () => {
+    const realExecStub = join(STUB_BIN_DIR, "sbx-real-exec-pwd");
+    writeFileSync(realExecStub, `#!/bin/bash\nshift 2\nexec "$@"\n`, "utf8");
+    chmodSync(realExecStub, 0o755);
+    const ws = mkdtempSync(join(tmpdir(), "ap-cwd-pwd-"));
+    try {
+      const runner = createSbxRunner({ sbxBinary: realExecStub, hostEnv: envBase() });
+      const outFile = join(ws, "pwd.txt");
+      const { exitCode } = await runner.execAgent({
+        name: "ap-test",
+        workspace: ws,
+        // Use `pwd -P` to get the physical path so macOS's /private symlink
+        // doesn't make this assertion brittle.
+        command: ["bash", "-c", `pwd -P > "${outFile}"`],
+      });
+      expect(exitCode).toBe(0);
+      const recorded = readFileSync(outFile, "utf8").trim();
+      // On darwin, mkdtemp returns /var/folders/... but `pwd -P` resolves the
+      // /private symlink — compare against realpath so this isn't flaky.
+      expect(recorded).toBe(realpathSync(ws));
+    } finally {
+      rmSync(ws, { recursive: true, force: true });
+    }
   });
 
   it("forwards corporate-network env vars (HTTP_PROXY, NODE_EXTRA_CA_CERTS, NPM_CONFIG_REGISTRY, etc.)", async () => {
@@ -155,7 +248,7 @@ describe("sbx-runner", () => {
         NO_COLOR: "",
       }),
     });
-    await runner.execAgent({ name: "ap-test", command: ["claude"] });
+    await runner.execAgent({ name: "ap-test", workspace: "/tmp/ws", command: ["claude"] });
     const childEnv = readCalls()[0].env;
     expect(childEnv.HTTP_PROXY).toBe("http://proxy.corp:8080");
     expect(childEnv.https_proxy).toBe("http://proxy.corp:8080");
@@ -186,7 +279,7 @@ describe("sbx-runner", () => {
         PYTHONPATH: "/some/host/path",
       }),
     });
-    await runner.execAgent({ name: "ap-test", command: ["claude"] });
+    await runner.execAgent({ name: "ap-test", workspace: "/tmp/ws", command: ["claude"] });
     const childEnv = readCalls()[0].env;
     expect(childEnv.SSH_AUTH_SOCK).toBeUndefined();
     expect(childEnv.AWS_ACCESS_KEY_ID).toBeUndefined();
@@ -205,7 +298,7 @@ describe("sbx-runner", () => {
         MYSTERIOUS_VAR: "value",
       }),
     });
-    await runner.execAgent({ name: "ap-test", command: ["claude"] });
+    await runner.execAgent({ name: "ap-test", workspace: "/tmp/ws", command: ["claude"] });
     const debugBlob = JSON.stringify(mockLogger.debug.mock.calls);
     expect(debugBlob).toMatch(/EDITOR/);
     expect(debugBlob).toMatch(/MYSTERIOUS_VAR/);
@@ -222,7 +315,7 @@ describe("sbx-runner", () => {
         AP_TOKEN_SECRET: "also-should-never-reach-abcdef",
       }),
     });
-    await runner.execAgent({ name: "ap-test", command: ["claude"] });
+    await runner.execAgent({ name: "ap-test", workspace: "/tmp/ws", command: ["claude"] });
     const calls = readCalls();
     const childEnv = calls[0].env;
     expect(childEnv.MCP_CONTROL_TOKEN).toBeUndefined();
@@ -269,7 +362,7 @@ describe("sbx-runner", () => {
         AP_TOKEN_X: "another-should-not-leak",
       }),
     });
-    await runner.execAgent({ name: "ap-test", command: ["claude"] });
+    await runner.execAgent({ name: "ap-test", workspace: "/tmp/ws", command: ["claude"] });
     const calls = readCalls();
     const childEnv = calls[0].env;
     expect(childEnv.MCP_CONTROL_FOO).toBeUndefined();
@@ -294,6 +387,7 @@ describe("sbx-runner", () => {
     setTimeout(() => controller.abort(), 50);
     const { exitCode } = await runner.execAgent({
       name: "ap-test",
+      workspace: "/tmp/ws",
       command: ["whatever"],
       signal: controller.signal,
     });

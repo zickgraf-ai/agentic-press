@@ -159,6 +159,15 @@ export interface AllowNetworkResult {
 
 export interface ExecAgentOptions {
   readonly name: string;
+  /**
+   * Workspace path the agent's cwd should be set to. `sbx exec` defaults the
+   * agent's cwd to `/home/agent/workspace`, which is a separate empty dir from
+   * the bind-mounted host workspace — so an agent that does `cat .mcp.json`
+   * from its cwd hits ENOENT. We wrap the command in a small bash script that
+   * `cd`s into this path before exec'ing the real command. See issue #75 and
+   * `.learnings/2026-05-11_apd-cwd-vs-workspace-mount.md`.
+   */
+  readonly workspace: string;
   readonly command: readonly string[];
   readonly signal?: AbortSignal;
 }
@@ -242,8 +251,35 @@ export function createSbxRunner(opts: SbxRunnerOptions = {}): SbxRunner {
       return { policyIds: matches };
     },
 
-    async execAgent({ name, command, signal }) {
-      const args = ["exec", name, ...command];
+    async execAgent({ name, workspace, command, signal }) {
+      // Wrap the agent command in a small bash script that cd's into the
+      // workspace before exec'ing it. `sbx exec` has no --cwd flag and its
+      // default cwd is /home/agent/workspace, distinct from the bind-mounted
+      // host workspace path. Most MCP clients (Claude Code, Codex, etc.) look
+      // for .mcp.json in the current working directory — without this cd they
+      // silently fail to find the proxy config (issue #75).
+      //
+      // Why not embed `cd <workspace>` directly in the script? The workspace
+      // path is operator-controlled and may contain spaces or quotes; passing
+      // it as a positional arg (consumed via `cd "$1" && shift`) bypasses any
+      // need for shell-escaping inside the script string.
+      //
+      // `exec "$@"` replaces the wrapper shell with the agent process so
+      // signals (SIGTERM from sbx, SIGINT from operator Ctrl-C) hit the agent
+      // directly and the exit code returned by sbx is the agent's, unmodified.
+      //
+      // Chose this wrapper over adding a manifest `cwd` field because every
+      // current and foreseeable manifest wants cwd = workspace. Exposing a
+      // separate cwd would be ceremony with no real use case until we hit one.
+      const wrappedCommand: readonly string[] = [
+        "bash",
+        "-lc",
+        'cd "$1" && shift && exec "$@"',
+        "--",
+        workspace,
+        ...command,
+      ];
+      const args = ["exec", name, ...wrappedCommand];
       const { out: env, dropped } = filterEnv(hostEnv);
       emitDropDebug("execAgent", dropped);
       // Inherit stdio in production so the operator sees the agent in real
