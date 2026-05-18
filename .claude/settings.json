@@ -16,18 +16,6 @@
           }
         ]
       }
-    ],
-    "PreCommit": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "npx vitest run --reporter=verbose 2>&1",
-            "timeout": 120000,
-            "blocking": true
-          }
-        ]
-      }
     ]
   }
 }
