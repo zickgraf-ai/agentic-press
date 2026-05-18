@@ -159,18 +159,21 @@ export interface AllowNetworkResult {
 
 export interface ExecAgentOptions {
   readonly name: string;
-  /**
-   * Workspace path the agent's cwd should be set to. `sbx exec` defaults the
-   * agent's cwd to `/home/agent/workspace`, which is a separate empty dir from
-   * the bind-mounted host workspace — so an agent that does `cat .mcp.json`
-   * from its cwd hits ENOENT. We wrap the command in a small bash script that
-   * `cd`s into this path before exec'ing the real command. See issue #75 and
-   * `.learnings/2026-05-11_apd-cwd-vs-workspace-mount.md`.
-   */
+  /** Absolute path inside the sandbox where the agent should be cwd'd before
+   *  it runs. See the wrapper comment inside `execAgent` for the why. */
   readonly workspace: string;
   readonly command: readonly string[];
   readonly signal?: AbortSignal;
 }
+
+/**
+ * Exit code the cwd wrapper emits when `cd <workspace>` fails inside the
+ * sandbox (workspace missing, bind-mount broken, permission denied). Chosen
+ * outside the 0-127 "real exit code" range used by typical agents and
+ * deliberately distinct from `EXIT_CODES.SBX_FAIL=67`. Document this in
+ * `docs/dispatch.md` whenever the apd exit table changes.
+ */
+export const WRAPPER_CD_FAILED_EXIT_CODE = 86;
 
 export interface ExecAgentResult {
   readonly exitCode: number;
@@ -254,27 +257,43 @@ export function createSbxRunner(opts: SbxRunnerOptions = {}): SbxRunner {
     async execAgent({ name, workspace, command, signal }) {
       // Wrap the agent command in a small bash script that cd's into the
       // workspace before exec'ing it. `sbx exec` has no --cwd flag and its
-      // default cwd is /home/agent/workspace, distinct from the bind-mounted
-      // host workspace path. Most MCP clients (Claude Code, Codex, etc.) look
-      // for .mcp.json in the current working directory — without this cd they
-      // silently fail to find the proxy config (issue #75).
+      // default cwd is /home/agent/workspace — a separate empty dir, NOT the
+      // bind-mounted host workspace. Most MCP clients (Claude Code, Codex,
+      // etc.) look for .mcp.json in the current working directory, so without
+      // this cd they silently miss the per-session proxy config (issue #75).
       //
-      // Why not embed `cd <workspace>` directly in the script? The workspace
-      // path is operator-controlled and may contain spaces or quotes; passing
-      // it as a positional arg (consumed via `cd "$1" && shift`) bypasses any
-      // need for shell-escaping inside the script string.
+      // Why pass the workspace as `$1` instead of interpolating it into the
+      // script string? The path is operator-controlled — paths with spaces,
+      // quotes, `$(...)`, or backticks would otherwise need careful escaping.
+      // Positional-arg semantics ($1 is consumed by cd, never re-evaluated by
+      // the shell) bypass the whole escaping question. Locked by the
+      // "workspace paths with spaces/quotes" and "command-substitution-safe"
+      // tests in `tests/dispatch/sbx-runner.test.ts`.
+      //
+      // `bash -c` (not `-lc`) is deliberate: a login shell would source
+      // /etc/profile and ~/.bash_profile inside the sandbox, which can mutate
+      // env (defeating `filterEnv`) or write to stdout (corrupting agents
+      // that parse their parent's stdout). The wrapper is plumbing; it must
+      // not introduce side effects of its own.
+      //
+      // `cd "$1" || exit 86` makes a cd failure (deleted workspace, broken
+      // bind-mount, perm denied) distinguishable from `agent exited 1`. The
+      // stderr message tells the operator which side failed. Without this,
+      // we'd fix one silent failure (issue #75) and introduce a new one at
+      // the same layer.
       //
       // `exec "$@"` replaces the wrapper shell with the agent process so
-      // signals (SIGTERM from sbx, SIGINT from operator Ctrl-C) hit the agent
-      // directly and the exit code returned by sbx is the agent's, unmodified.
+      // signals (SIGTERM from sbx, SIGINT from Ctrl-C) hit the agent directly
+      // and the exit code returned by sbx is the agent's, unmodified —
+      // EXCEPT when the cd itself fails (then it's 86, see above).
       //
-      // Chose this wrapper over adding a manifest `cwd` field because every
-      // current and foreseeable manifest wants cwd = workspace. Exposing a
-      // separate cwd would be ceremony with no real use case until we hit one.
+      // Chose this wrapper over a manifest `cwd` field because no current
+      // use case wants cwd != workspace; a separate field would be ceremony
+      // until that use case shows up. Easy to add later if it does.
       const wrappedCommand: readonly string[] = [
         "bash",
-        "-lc",
-        'cd "$1" && shift && exec "$@"',
+        "-c",
+        `cd "$1" || { echo "apd cwd-wrapper: cd to \\"$1\\" failed inside sandbox (workspace may be missing or unmounted; issue #75)" >&2; exit ${WRAPPER_CD_FAILED_EXIT_CODE}; }; shift; exec "$@"`,
         "--",
         workspace,
         ...command,

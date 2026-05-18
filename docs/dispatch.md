@@ -26,10 +26,15 @@ Optional fields: `sandboxName` (override the generated `ap-<type>-<id>` name), `
 To make this work transparently, `apd` wraps every `agentCommand` in:
 
 ```bash
-bash -lc 'cd "$1" && shift && exec "$@"' -- <workspace> <agentCommand...>
+bash -c 'cd "$1" || { echo "apd cwd-wrapper: cd to ..." >&2; exit 86; }; shift; exec "$@"' \
+  -- <workspace> <agentCommand...>
 ```
 
-The workspace rides as a positional argument (consumed via `cd "$1" && shift`) so paths with spaces or quotes don't need shell-escaping. `exec "$@"` replaces the wrapper shell with the agent process, so SIGTERM/SIGINT and the agent's exit code propagate unchanged.
+(`bash -c`, not `bash -lc` — a login shell would source `/etc/profile` inside the sandbox and could mutate env or corrupt stdout. The wrapper is plumbing and must not introduce side effects.)
+
+The workspace rides as a positional argument (consumed via `cd "$1"`) so paths with spaces, quotes, `$(...)`, or backticks need no shell-escaping — `"$1"` is double-quoted parameter expansion, and bash does not re-evaluate the parameter's contents. `exec "$@"` replaces the wrapper shell with the agent process, so SIGTERM/SIGINT and the agent's exit code propagate unchanged once the agent is running.
+
+If `cd` itself fails (workspace was deleted, bind-mount broke, permission denied), the wrapper exits **86** with an `apd cwd-wrapper: ...` line on stderr. The dedicated exit code makes a wrapper failure distinguishable from a real agent exit code of `1`.
 
 **Practical consequence for manifest authors:** write `agentCommand` as if your shell is already in the workspace. Don't prefix it with `cd <workspace> && …`. Relative paths in `agentCommand` are resolved against the workspace.
 
@@ -52,19 +57,20 @@ Inside the sandbox, the agent sees `pwd` = `/tmp/ap-review-ws` and `.mcp.json` i
 
 ## Environment scoping
 
-`apd` filters the host environment before invoking `sbx exec` — only a positive allow-list (PATH, HOME, locale, proxy and TLS vars, npm/node tooling) reaches the sandbox. Notably, `MCP_CONTROL_TOKEN` and any `AP_TOKEN_*` are stripped to keep the control-plane trust boundary intact. See `src/dispatch/sbx-runner.ts` for the canonical list.
+`apd` filters the host environment before invoking `sbx exec`: only a positive allow-list (PATH, HOME, locale, proxy and TLS vars, npm/node tooling) reaches the sandbox. On top of that, two forbidden **prefixes** are stripped even if accidentally allow-listed — `MCP_CONTROL*` and `AP_TOKEN*` — to keep the control-plane trust boundary intact. So `MCP_CONTROL_TOKEN`, `MCP_CONTROL_FOO`, `AP_TOKEN_SECRET`, and any future variant are all dropped before sbx ever sees them. See `src/dispatch/sbx-runner.ts` (`ALLOWED_ENV_KEYS` and `FORBIDDEN_ENV_PREFIXES`) for the canonical lists.
 
 ## Exit codes
 
 | Code | Meaning |
 |------|---------|
 | 0    | Agent exited 0; sandbox torn down cleanly. |
-| 64   | Manifest invalid or bad CLI invocation. |
+| 64   | Manifest invalid, bad CLI flag, or invalid `MCP_PROXY_PORT`. |
 | 65   | `MCP_CONTROL_TOKEN` not set. |
 | 66   | Control-plane `register` failed. |
-| 67   | `sbx create` / `sbx policy allow` / `sbx exec` failed. |
+| 67   | `sbx create` / `sbx policy allow` / `sbx exec` failed at the apd level. |
 | 68   | Workspace path invalid (missing, not absolute, not a directory). |
 | 69   | `.mcp.json` already exists in workspace (pass `--force` to overwrite). |
 | 70   | Cleanup leak — sandbox or policy may still exist (`sbx ls`, `sbx policy ls`). |
-| 71   | Internal error. |
-| *N*  | Otherwise: the agent's own exit code, unmodified by the wrapper. |
+| 71   | Internal error (uncaught exception in `apd`; see stderr). |
+| 86   | Cwd wrapper: `cd <workspace>` failed inside the sandbox (workspace missing or unmounted). Agent never ran. |
+| *N*  | Otherwise: the agent's own exit code, unmodified by the wrapper (assumes `cd` succeeded). |

@@ -146,7 +146,7 @@ describe("sbx-runner", () => {
     expect(exitCode).toBe(42);
   });
 
-  it("execAgent wraps command in `bash -lc 'cd \"$1\" && shift && exec \"$@\"' -- <workspace> <cmd...>` so the agent starts at the workspace cwd (issue #75)", async () => {
+  it("execAgent wraps command in `bash -c '<cd-wrapper>' -- <workspace> <cmd...>` so the agent starts at the workspace cwd (issue #75)", async () => {
     const runner = createSbxRunner({ sbxBinary: STUB_PATH, hostEnv: envBase() });
     await runner.execAgent({
       name: "ap-test",
@@ -154,15 +154,22 @@ describe("sbx-runner", () => {
       command: ["claude", "--allowedTools", "echo__x"],
     });
     const argv = readCalls()[0].argv;
-    // Shape contract: exec <name> bash -lc <script> -- <workspace> <original cmd...>
+    // Shape contract: exec <name> bash -c <script> -- <workspace> <original cmd...>
     expect(argv[0]).toBe("exec");
     expect(argv[1]).toBe("ap-test");
     expect(argv[2]).toBe("bash");
-    expect(argv[3]).toBe("-lc");
-    // Script body cd's into $1, then execs the rest. Keeping the workspace out
-    // of the script string means paths with spaces/quotes never need
-    // shell-escaping — they ride positional-arg semantics.
+    // `-c`, NOT `-lc` — login shell would source /etc/profile and friends
+    // inside the sandbox; that can mutate env (defeating filterEnv) or write
+    // to stdout (corrupting agents that parse their parent's stdout). The
+    // wrapper is plumbing and must not introduce side effects.
+    expect(argv[3]).toBe("-c");
+    // Script body cd's into $1, exits 86 with a stderr message if cd fails
+    // (so the operator can distinguish "wrapper broke" from "agent exited 1"),
+    // then execs the rest. Workspace stays out of the script string so paths
+    // with spaces/quotes/$()/backticks need no shell-escaping.
     expect(argv[4]).toContain('cd "$1"');
+    expect(argv[4]).toContain('exit 86');
+    expect(argv[4]).toContain('apd cwd-wrapper');
     expect(argv[4]).toContain('shift');
     expect(argv[4]).toContain('exec "$@"');
     expect(argv[5]).toBe("--"); // dummy $0
@@ -224,6 +231,68 @@ describe("sbx-runner", () => {
     } finally {
       rmSync(ws, { recursive: true, force: true });
     }
+  });
+
+  it("cd failure exits 86 (NOT 1) with a stderr message so the operator can distinguish wrapper failure from agent failure", async () => {
+    const realExecStub = join(STUB_BIN_DIR, "sbx-real-exec-cdfail");
+    // Capture stderr from the inner wrapper to a file so we can assert on the
+    // operator-visible message. The capture path is passed through the
+    // `SBX_STUB_*` env prefix because that's the only namespace `filterEnv`
+    // forwards to sbx children — see `ALLOWED_ENV_PREFIXES` in sbx-runner.ts.
+    writeFileSync(
+      realExecStub,
+      `#!/bin/bash\nshift 2\nexec "$@" 2>"$SBX_STUB_CDFAIL_STDERR_FILE"\n`,
+      "utf8"
+    );
+    chmodSync(realExecStub, 0o755);
+    const captureFile = join(TMP_ROOT, `cdfail-stderr-${Date.now()}.txt`);
+    const missingWs = "/tmp/ap-this-workspace-does-not-exist-abc123";
+    const runner = createSbxRunner({
+      sbxBinary: realExecStub,
+      hostEnv: envBase({ SBX_STUB_CDFAIL_STDERR_FILE: captureFile }),
+    });
+    const { exitCode } = await runner.execAgent({
+      name: "ap-test",
+      workspace: missingWs,
+      command: ["bash", "-c", "echo SHOULD_NOT_RUN"],
+    });
+    // 86 is the dedicated wrapper-cd-failure code (NOT bash's default 1 from
+    // a failed cd, NOT 0 from a happy agent). This is what makes the failure
+    // observable instead of silently masquerading as "agent exited 1".
+    expect(exitCode).toBe(86);
+    const stderr = readFileSync(captureFile, "utf8");
+    expect(stderr).toContain("apd cwd-wrapper");
+    expect(stderr).toContain(missingWs);
+    // The "should not run" inner command must never have executed.
+    expect(stderr).not.toContain("SHOULD_NOT_RUN");
+  });
+
+  it("workspace containing $(...) / backticks is treated as a literal string (no command substitution)", async () => {
+    // The wrapper script accesses the workspace via "$1". Inside a
+    // double-quoted parameter expansion, bash does NOT re-evaluate the
+    // value's contents — so a workspace path whose name happens to contain
+    // shell metacharacters cannot trigger command substitution. Locks the
+    // central security claim of the wrapper.
+    const realExecStub = join(STUB_BIN_DIR, "sbx-real-exec-injection");
+    writeFileSync(realExecStub, `#!/bin/bash\nshift 2\nexec "$@"\n`, "utf8");
+    chmodSync(realExecStub, 0o755);
+    const markerFile = join(TMP_ROOT, `wrapper-pwn-marker-${Date.now()}`);
+    // Belt-and-braces: make sure the marker doesn't pre-exist.
+    if (existsSync(markerFile)) rmSync(markerFile);
+    // Workspace path includes a command-substitution payload that would
+    // touch the marker file if the wrapper ever re-evaluated $1. This dir
+    // doesn't exist on disk, so the cd will fail with exit 86 — that's the
+    // expected outcome; the point of the test is that the marker file
+    // doesn't exist after the run.
+    const evilWs = `/tmp/ap-cdwrap-test-$(touch ${markerFile})-end`;
+    const runner = createSbxRunner({ sbxBinary: realExecStub, hostEnv: envBase() });
+    const { exitCode } = await runner.execAgent({
+      name: "ap-test",
+      workspace: evilWs,
+      command: ["bash", "-c", "echo SHOULD_NOT_RUN"],
+    });
+    expect(exitCode).toBe(86);
+    expect(existsSync(markerFile)).toBe(false);
   });
 
   it("forwards corporate-network env vars (HTTP_PROXY, NODE_EXTRA_CA_CERTS, NPM_CONFIG_REGISTRY, etc.)", async () => {
