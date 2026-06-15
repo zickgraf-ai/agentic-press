@@ -216,6 +216,7 @@ export async function runDispatchWithDeps(argv: readonly string[], deps: Dispatc
     try {
       const result = await sbxRunner.execAgent({
         name: sandboxName,
+        workspace,
         command: entry.agentCommand,
         signal: deps.signal,
       });
